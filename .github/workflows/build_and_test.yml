@@ -1,35 +1,65 @@
-name: J-RIDER_Mac_Beta
+name: Build Mac & Windows
 
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
 
 jobs:
-  build:
-    name: Build macOS Beta
+  # -----------------------------------------------------------------
+  #  JOB 1: MAC BUILD (What we had before)
+  # -----------------------------------------------------------------
+  build_mac:
+    name: Build macOS
     runs-on: macos-latest
     
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
-      - name: Install Ninja
-        run: brew install ninja
+    - name: Install Ninja
+      run: brew install ninja
 
-      - name: Configure CMake
-        # We use -G Ninja for speed on the cloud runners
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+    - name: Configure CMake
+      run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
 
-      - name: Build Plugins
-        run: cmake --build build --config Release --target Rider001_All
+    - name: Build
+      run: cmake --build build --config Release
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: J-RIDER-Mac-Beta-Plugins
-          path: |
-            build/Rider001_artefacts/Release/VST3/Rider001.vst3
-            build/Rider001_artefacts/Release/AU/Rider001.component
+    - name: Upload Mac Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: Rider001-Mac
+        path: |
+          build/**/*_artefacts/Release/**/*.vst3
+          build/**/*_artefacts/Release/**/*.component
+          build/**/*_artefacts/Release/**/*.app
+
+  # -----------------------------------------------------------------
+  #  JOB 2: WINDOWS BUILD (The New Part!)
+  # -----------------------------------------------------------------
+  build_windows:
+    name: Build Windows
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Configure CMake
+      # Windows uses "Visual Studio" automatically, no Ninja needed
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build
+      run: cmake --build build --config Release
+
+    - name: Upload Windows Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: Rider001-Windows
+        path: |
+          build/**/*.vst3
+          build/**/*.exe
