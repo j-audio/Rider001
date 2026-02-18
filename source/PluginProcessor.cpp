@@ -6,9 +6,10 @@ PluginProcessor::PluginProcessor()
      : AudioProcessor (BusesProperties()
                      #if ! JucePlugin_IsMidiEffect
                       #if ! JucePlugin_IsSynth
-                       .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
+                       .withInput  ("Input",     juce::AudioChannelSet::stereo(), true)
                       #endif
-                       .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
+                       .withOutput ("Output",    juce::AudioChannelSet::stereo(), true)
+                       .withInput  ("Sidechain", juce::AudioChannelSet::stereo(), true) // <--- THIS IS THE MISSING KEY!
                      #endif
                        )
 {
@@ -107,26 +108,25 @@ bool PluginProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
     juce::ignoreUnused (layouts);
     return true;
   #else
-    // 1. Check Main Output (Mono or Stereo)
-    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::mono()
-     && layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
+    // 1. Main Output must be Stereo
+    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
         return false;
 
-    // 2. Check Input matches Output (unless it's a Synth)
+    // 2. Main Input must match Output (Stereo)
    #if ! JucePlugin_IsSynth
     if (layouts.getMainOutputChannelSet() != layouts.getMainInputChannelSet())
         return false;
    #endif
 
-    // 3. THE SIDECHAIN ADDITION
-    // We check the Auxiliary Input Bus (Index 1)
-    auto sidechainBus = layouts.getChannelSet(true, 1);
-
-    // We allow it to be empty (Disabled), Mono, or Stereo
-    if (!sidechainBus.isDisabled() &&
-        sidechainBus != juce::AudioChannelSet::mono() &&
-        sidechainBus != juce::AudioChannelSet::stereo())
-        return false;
+    // 3. Sidechain Check (The Fix)
+    // We check if the Sidechain bus (index 1) exists and is valid
+    // We allow it to be Disabled OR Stereo.
+    if (layouts.inputBuses.size() > 1)
+    {
+        auto sidechain = layouts.inputBuses.getReference(1);
+        if (! sidechain.isDisabled() && sidechain != juce::AudioChannelSet::stereo())
+            return false;
+    }
 
     return true;
   #endif
