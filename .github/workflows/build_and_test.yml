@@ -29,7 +29,7 @@ jobs:
       run: cmake --build build --config Release
 
     - name: Upload Mac Artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: Rider001-Mac
         path: |
@@ -57,7 +57,7 @@ jobs:
       run: cmake --build build --config Release
 
     - name: Upload Windows Artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: Rider001-Windows
         path: |
