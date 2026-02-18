@@ -1,0 +1,9 @@
+﻿build/
+.vs/
+.claude/
+out/
+*.user
+*.suo
+*.pdb
+*.ilk
+*.lib
