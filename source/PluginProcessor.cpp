@@ -9,7 +9,7 @@ PluginProcessor::PluginProcessor()
                        .withInput  ("Input",     juce::AudioChannelSet::stereo(), true)
                       #endif
                        .withOutput ("Output",    juce::AudioChannelSet::stereo(), true)
-                       .withInput  ("Sidechain", juce::AudioChannelSet::stereo(), true) // <--- THIS IS THE MISSING KEY!
+                       .withInput  ("Sidechain", juce::AudioChannelSet::stereo(), true)
                      #endif
                        )
 {
@@ -118,7 +118,7 @@ bool PluginProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
         return false;
    #endif
 
-    // 3. Sidechain Check (The Fix)
+    // 3. Sidechain Check
     // We check if the Sidechain bus (index 1) exists and is valid
     // We allow it to be Disabled OR Stereo.
     if (layouts.inputBuses.size() > 1)
@@ -150,24 +150,41 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     auto mainBuffer = getBusBuffer(buffer, true, 0); 
     auto sidechainBuffer = getBusBuffer(buffer, true, 1);
 
-    // 3. Measure input levels
+    // 3. Measure input levels (RMS)
     float dryRMS   = sidechainBuffer.getRMSLevel(0, 0, sidechainBuffer.getNumSamples());
     float inputRMS = mainBuffer.getRMSLevel(0, 0, mainBuffer.getNumSamples());
 
     // Store sidechain level for UI
     sidechainBusLevel.store(dryRMS);
 
-    // 4. Gain Factor — if sidechain is silent, force output to zero
     float gainFactor;
-    if (dryRMS < 0.00001f)
+
+    // POINT 1 FIX: BYPASS IF INPUT IS SILENT
+    // If the Main Input is practically silent (< -100dB), don't try to boost it.
+    // Just pass it through at Unity Gain (1.0).
+    if (inputRMS < 0.00001f)
     {
-        gainFactor = 0.0f;
+        gainFactor = 1.0f;
     }
     else
     {
-        gainFactor = dryRMS / (inputRMS + 0.00001f);
-        // 5. Safety: cap at 4x (12 dB)
-        if (gainFactor > 4.0f) gainFactor = 4.0f;
+        // Normal Operation: Match Sidechain to Input
+        
+        // If Sidechain is silent, we gate to 0 (Silence)
+        if (dryRMS < 0.00001f)
+        {
+            gainFactor = 0.0f;
+        }
+        else
+        {
+            // Calculate Ratio
+            gainFactor = dryRMS / (inputRMS + 0.00001f);
+            
+            // POINT 3 FIX: UNCAP POSITIVE GAIN
+            // Previously capped at 4.0 (12dB). Now capped at 32.0 (approx +30dB).
+            // This allows "Full Range" action while preventing speaker blowouts.
+            if (gainFactor > 32.0f) gainFactor = 32.0f;
+        }
     }
 
     // Store gain in dB — explicit zero guard prevents log(0) = -inf
@@ -220,21 +237,15 @@ juce::AudioProcessorEditor* PluginProcessor::createEditor()
 //==============================================================================
 void PluginProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    // You should use this method to store your parameters in the memory block.
-    // You could do that either as raw data, or use the XML or ValueTree classes
-    // as intermediaries to make it easy to save and load complex data.
     juce::ignoreUnused (destData);
 }
 
 void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    // You should use this method to restore your parameters from this memory block,
-    // whose contents will have been created by the getStateInformation() call.
     juce::ignoreUnused (data, sizeInBytes);
 }
 
 //==============================================================================
-// This creates new instances of the plugin..
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new PluginProcessor();

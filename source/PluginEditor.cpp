@@ -175,9 +175,13 @@ void PluginEditor::timerCallback()
     float sidechainLevel = processorRef.getSidechainBusLevel();
     float gainDb         = processorRef.getCurrentGainDb();
 
-    // Convert linear levels to dB (-90 floor)
-    float targetAnalyzed = juce::Decibels::gainToDecibels(sidechainLevel, -90.0f);
-    float targetOutput   = juce::Decibels::gainToDecibels(mainLevel,      -90.0f);
+    // POINT 2 FIX: METER CALIBRATION
+    // We add +12dB to the RMS level so it visually aligns with the DAW's Peak Meter.
+    // This makes -10dBFS RMS look like ~0dB Peak on the meter.
+    float calibrationOffset = 12.0f;
+
+    float targetAnalyzed = juce::Decibels::gainToDecibels(sidechainLevel, -90.0f) + calibrationOffset;
+    float targetOutput   = juce::Decibels::gainToDecibels(mainLevel,      -90.0f) + calibrationOffset;
     float targetAction   = gainDb;
 
     // Save previous values to detect movement
@@ -185,10 +189,11 @@ void PluginEditor::timerCallback()
     float prevOutput   = smoothedOutput;
     float prevAction   = smoothedAction;
 
-    // Ballistics: fast attack (0.2), slow release (0.08)
+    // POINT 4 FIX: SLOWER BALLISTICS
+    // Slowed down coefficients by half (0.1 and 0.04) for "Heavy" vintage feel.
     auto smooth = [](float& current, float target)
     {
-        float coeff = (target > current) ? 0.2f : 0.08f;
+        float coeff = (target > current) ? 0.1f : 0.04f;
         current += coeff * (target - current);
     };
 
@@ -209,11 +214,11 @@ void PluginEditor::timerCallback()
 
     // Repaint only if values moved significantly
     bool needsRepaint = sidechainChanged
-                     || peakActive
-                     || actionPeak
-                     || (std::abs(smoothedAnalyzed - prevAnalyzed) > 0.05f)
-                     || (std::abs(smoothedOutput   - prevOutput)   > 0.05f)
-                     || (std::abs(smoothedAction   - prevAction)   > 0.05f);
+                      || peakActive
+                      || actionPeak
+                      || (std::abs(smoothedAnalyzed - prevAnalyzed) > 0.05f)
+                      || (std::abs(smoothedOutput   - prevOutput)   > 0.05f)
+                      || (std::abs(smoothedAction   - prevAction)   > 0.05f);
 
     if (needsRepaint)
         repaint();
@@ -251,8 +256,6 @@ void PluginEditor::drawVintageMeter(juce::Graphics& g, juce::Rectangle<int> boun
     float endAngleFromVertical   =  55.0f;
 
     // Convert from "angle from vertical" to JUCE angles (radians)
-    // JUCE: 0 = right, π/2 = down, π = left, 3π/2 = up
-    // Vertical (up) = -π/2, so add our angle to that
     float startAngle = juce::degreesToRadians(-90.0f + startAngleFromVertical);
     float endAngle = juce::degreesToRadians(-90.0f + endAngleFromVertical);
 
@@ -271,7 +274,7 @@ void PluginEditor::drawVintageMeter(juce::Graphics& g, juce::Rectangle<int> boun
     // Draw tick marks on the arc
     float tickMarks[] = {-60, -20, -10, -7, -5, -3, 0, 3};
 
-    // Angle mapping widened to ±55° (scale factor 55/45 ≈ 1.2222 applied to all values)
+    // Angle mapping widened to ±55°
     auto dbToAngle = [](float db) -> float {
         if (db == -60.0f) return -55.00f;
         if (db == -20.0f) return -28.70f;
@@ -290,7 +293,7 @@ void PluginEditor::drawVintageMeter(juce::Graphics& g, juce::Rectangle<int> boun
         float angleFromVertical = dbToAngle(db);
         float angle = juce::degreesToRadians(-90.0f + angleFromVertical);
 
-        // Calculate tick positions on the arc ellipse (using values from above)
+        // Calculate tick positions on the arc ellipse
         float outerX = arcCenterX + radiusX * std::cos(angle);
         float outerY = arcCenterY + radiusY * std::sin(angle);
         float innerX = arcCenterX + (radiusX - 6.0f) * std::cos(angle);
@@ -307,29 +310,24 @@ void PluginEditor::drawVintageMeter(juce::Graphics& g, juce::Rectangle<int> boun
         g.drawLine(innerX, innerY, outerX, outerY, thickness);
 
         // SCALE NUMBERS - Use EXACT same angle as tick mark
-        // STRICT RULE: angle is already calculated above - DO NOT recalculate
-        // Reduce radius by 8 pixels from inner tick (tightened gap)
-        float textRadiusX = radiusX - 6.0f - 8.0f;  // Account for ellipse X
-        float textRadiusY = radiusY - 6.0f - 8.0f;  // Account for ellipse Y
+        float textRadiusX = radiusX - 6.0f - 8.0f;
+        float textRadiusY = radiusY - 6.0f - 8.0f;
 
         // Calculate text position at EXACT same angle, reduced radius
         float textX = arcCenterX + textRadiusX * std::cos(angle);
         float textY = arcCenterY + textRadiusY * std::sin(angle);
 
-        // Font consistency - same as Action meter (8pt bold)
+        // Font consistency
         g.setFont(juce::FontOptions(8.0f).withStyle("Bold"));
 
-        // Color scheme: 0 and 3 in RED, others in dark grey
+        // Color scheme
         if (db == 0.0f || db == 3.0f)
-            g.setColour(juce::Colours::red);  // Red for zero and peak
+            g.setColour(juce::Colours::red);
         else
-            g.setColour(juce::Colour(0xff333333));  // Dark grey for normal values
+            g.setColour(juce::Colour(0xff333333));
 
-        // Create label text: REMOVE signs, display absolute values
-        // 20, 10, 7, 5, 3, 0, 3 (no + or -)
         juce::String label = juce::String(static_cast<int>(std::abs(db)));
 
-        // Draw text CENTERED on the point (Justification::centred)
         g.drawText(label, static_cast<int>(textX - 12), static_cast<int>(textY - 8),
                    24, 16, juce::Justification::centred);
     }
@@ -338,22 +336,22 @@ void PluginEditor::drawVintageMeter(juce::Graphics& g, juce::Rectangle<int> boun
     g.setColour(juce::Colours::black);
     g.setFont(juce::FontOptions(11.0f).withStyle("Bold"));
     g.drawText("VU", static_cast<int>(boxX + boxWidth * 0.5f - 15),
-                     static_cast<int>(boxY + boxHeight * 0.5f),
-                     30, 20, juce::Justification::centred);
+                      static_cast<int>(boxY + boxHeight * 0.5f),
+                      30, 20, juce::Justification::centred);
 
-    g.setColour(juce::Colour(0xff333333));  // Dark grey for crisp branding
+    g.setColour(juce::Colour(0xff333333));
     g.setFont(juce::FontOptions(8.0f).withStyle("Bold"));
     g.drawText("J-RIDER", static_cast<int>(boxX + boxWidth - 42),
-                          static_cast<int>(boxY + boxHeight - 12),
-                          38, 10, juce::Justification::centredRight);
+                           static_cast<int>(boxY + boxHeight - 12),
+                           38, 10, juce::Justification::centredRight);
 
     // Hybrid needle angle: -90→-60 dB sweeps from rest position to the scale edge
     float db = levelDb;
     float angleDegrees;
     if (db <= -90.0f)
-        angleDegrees = -70.0f;                                                       // Rest: beyond arc left edge
+        angleDegrees = -70.0f;
     else if (db <= -60.0f)
-        angleDegrees = juce::jmap(db, -90.0f, -60.0f, -70.0f, -55.0f);             // Swing into visible scale
+        angleDegrees = juce::jmap(db, -90.0f, -60.0f, -70.0f, -55.0f);
     else if (db <= -20.0f)
         angleDegrees = juce::jmap(db, -60.0f, -20.0f, -55.0f, -28.70f);
     else if (db <= -10.0f)
@@ -373,8 +371,7 @@ void PluginEditor::drawVintageMeter(juce::Graphics& g, juce::Rectangle<int> boun
 
     float angleRadians = juce::degreesToRadians(angleDegrees);
 
-    // Calculate needle endpoint using sin/cos
-    // 0 degrees = straight up, positive = clockwise
+    // Calculate needle endpoint
     float needleLength = boxHeight * 0.7f;
     float needleEndX = pivotX + (needleLength * std::sin(angleRadians));
     float needleEndY = pivotY - (needleLength * std::cos(angleRadians));
@@ -399,54 +396,46 @@ void PluginEditor::drawVintageMeter(juce::Graphics& g, juce::Rectangle<int> boun
 
 void PluginEditor::drawActionMeter(juce::Graphics& g, juce::Rectangle<int> bounds, float gainDb)
 {
-    // Fixed coordinates - no transformations
+    // Fixed coordinates
     float boxX = static_cast<float>(bounds.getX());
     float boxY = static_cast<float>(bounds.getY());
     float meterWidth = static_cast<float>(bounds.getWidth());
     float meterHeight = static_cast<float>(bounds.getHeight());
 
-    // Draw clean parchment background (solid color)
+    // Background
     g.setColour(juce::Colour(0xFFE8D9A1));
     g.fillRoundedRectangle(boxX, boxY, meterWidth, meterHeight, 5.0f);
 
-    // Draw border
+    // Border
     g.setColour(juce::Colour(0xff3a3a3a));
     g.drawRoundedRectangle(boxX, boxY, meterWidth, meterHeight, 5.0f, 1.5f);
 
-    // VERTICAL SPACE MANAGEMENT
     // Pivot at top-center
     float pivotX = boxX + (meterWidth * 0.5f);
     float pivotY = boxY + 0.0f;
 
-    // Needle length: 80% of box height (leaves room for text)
+    // Needle dimensions
     float needleLength = meterHeight * 0.8f;
-
-    // Tick mark radius: Same as needle length (touches needle tip)
     float tickRadius = needleLength;
-
-    // Text radius: 92% of box height (below ticks, inside bottom edge)
     float textRadius = meterHeight * 0.92f;
 
-    // HORIZONTAL SPREAD - limited to ±0.7 radians (≈40°) for safe fit
+    // HORIZONTAL SPREAD
     const float maxAngleRadians = 0.7f;
     const float maxAngleDegrees = juce::radiansToDegrees(maxAngleRadians);
 
-    // Draw symmetrical tick marks: -9, -6, -3, 0, +3, +6, +9 dB
+    // Tick marks: -9 to +9
     float tickMarks[] = {-9, -6, -3, 0, 3, 6, 9};
 
     for (float db : tickMarks)
     {
-        // Map dB to angle: -9→LEFT, 0→centre, +9→RIGHT (matches pin positions)
         float angleFromVertical = juce::jmap(db, -9.0f, 9.0f, maxAngleDegrees, -maxAngleDegrees);
         float angle = juce::degreesToRadians(90.0f + angleFromVertical);
 
-        // Calculate TICK positions at needle tip radius
         float tickOuterX = pivotX + tickRadius * std::cos(angle);
         float tickOuterY = pivotY + tickRadius * std::sin(angle);
         float tickInnerX = pivotX + (tickRadius - 6.0f) * std::cos(angle);
         float tickInnerY = pivotY + (tickRadius - 6.0f) * std::sin(angle);
 
-        // Color: red for positive, black for negative, thicker at 0
         if (db > 0.0f)
             g.setColour(juce::Colours::red);
         else if (db < 0.0f)
@@ -457,91 +446,75 @@ void PluginEditor::drawActionMeter(juce::Graphics& g, juce::Rectangle<int> bound
         float thickness = (db == 0) ? 2.0f : 1.2f;
         g.drawLine(tickInnerX, tickInnerY, tickOuterX, tickOuterY, thickness);
 
-        // Calculate TEXT position at 92% radius (below ticks)
         float textX = pivotX + textRadius * std::cos(angle);
         float textY = pivotY + textRadius * std::sin(angle);
 
-        // Draw dB labels - CENTERED on coordinate
         g.setFont(juce::FontOptions(8.0f).withStyle("Bold"));
         juce::String label = (db > 0) ? ("+" + juce::String(static_cast<int>(db)))
-                                       : juce::String(static_cast<int>(db));
+                                      : juce::String(static_cast<int>(db));
 
-        // Center text on the coordinate (prevents overhang)
         g.drawText(label, static_cast<int>(textX - 15), static_cast<int>(textY - 8),
                    30, 16, juce::Justification::centred);
     }
 
-    // NEEDLE LOGIC - rotates to match ±0.7 radian mapping
-    // Pivot already defined above (pivotX, pivotY)
-    // needleLength already defined above (80% of height)
-
-    // Pinned needle: snaps to extremes outside ±9 dB, smooth inside
+    // NEEDLE LOGIC
+    // Pin at extremes (-9 to +9) for VISUALS, even if audio is boosting to +30dB
     float needleAngleFromVertical;
     if (gainDb <= -9.0f)
-        needleAngleFromVertical =  maxAngleDegrees;   // Pin hard LEFT  (130°)
+        needleAngleFromVertical =  maxAngleDegrees;   // Pin hard LEFT
     else if (gainDb >= 9.0f)
-        needleAngleFromVertical = -maxAngleDegrees;   // Pin hard RIGHT (50°)
+        needleAngleFromVertical = -maxAngleDegrees;   // Pin hard RIGHT
     else
         needleAngleFromVertical = juce::jmap(gainDb, -9.0f, 9.0f, maxAngleDegrees, -maxAngleDegrees);
 
     float needleAngle = juce::degreesToRadians(90.0f + needleAngleFromVertical);
 
-    // Calculate needle tip position
     float needleTipX = pivotX + needleLength * std::cos(needleAngle);
     float needleTipY = pivotY + needleLength * std::sin(needleAngle);
 
-    // Draw needle with shadow
+    // Draw needle
     g.setColour(juce::Colours::black.withAlpha(0.5f));
     g.drawLine(pivotX + 1, pivotY + 1, needleTipX + 1, needleTipY + 1, 2.0f);
 
     g.setColour(juce::Colours::black);
     g.drawLine(pivotX, pivotY, needleTipX, needleTipY, 2.0f);
 
-    // Keep J-RIDER branding in bottom right
-    g.setColour(juce::Colour(0xff333333));  // Dark grey for crisp branding
+    // Branding
+    g.setColour(juce::Colour(0xff333333));
     g.setFont(juce::FontOptions(8.0f).withStyle("Bold"));
     g.drawText("J-RIDER", static_cast<int>(boxX + meterWidth - 42),
-                          static_cast<int>(boxY + meterHeight - 12),
-                          38, 10, juce::Justification::centredRight);
+                           static_cast<int>(boxY + meterHeight - 12),
+                           38, 10, juce::Justification::centredRight);
 
-    // PEAK LED in top right (driven by actionPeak from timerCallback)
+    // LED
     g.setColour(actionPeak ? juce::Colours::red : juce::Colour(0xFF440000));
     g.fillEllipse(boxX + meterWidth - 16, boxY + 8, 8, 8);
 }
 
 void PluginEditor::drawMeterArc(juce::Graphics& g, juce::Point<float> arcCenter, float arcRadius, juce::Rectangle<float> box)
 {
-    // AXIS CORRECTION: Arc sweeps from -0.7 to +0.7 radians (horizontal left to right)
-    float startAngle = -juce::MathConstants<float>::halfPi - 0.7f;  // Left side
-    float endAngle = -juce::MathConstants<float>::halfPi + 0.7f;    // Right side
+    float startAngle = -juce::MathConstants<float>::halfPi - 0.7f;
+    float endAngle = -juce::MathConstants<float>::halfPi + 0.7f;
 
-    // Draw main arc path (horizontal curve at top of box)
     g.setColour(juce::Colours::black.withAlpha(0.6f));
     juce::Path arcPath;
     arcPath.addCentredArc(arcCenter.x, arcCenter.y, arcRadius, arcRadius, 0.0f, startAngle, endAngle, true);
     g.strokePath(arcPath, juce::PathStrokeType(1.5f));
 
-    // Draw tick marks at dB values on the arc
     float tickMarks[] = {-20, -10, -7, -5, -3, 0, 3};
     for (float db : tickMarks)
     {
-        // Map dB to angle: -20dB → -0.7 rad, 0dB → 0.0 rad, +3dB → +0.7 rad
         float angleFromVertical = juce::jmap(db, -20.0f, 3.0f, -0.7f, 0.7f);
-
-        // Convert to JUCE coordinate system (straight up = -π/2)
         float angle = -juce::MathConstants<float>::halfPi + angleFromVertical;
 
-        // Calculate tick mark positions on the arc
         auto outerPoint = arcCenter.getPointOnCircumference(arcRadius, angle);
         auto innerPoint = arcCenter.getPointOnCircumference(arcRadius - 6.0f, angle);
 
-        // Red section from 0dB to +3dB
         if (db >= 0.0f)
             g.setColour(juce::Colours::red);
         else
             g.setColour(juce::Colours::black.withAlpha(0.6f));
 
-        // Thicker marks at 0 and +3
         float thickness = (db == 0 || db == 3) ? 2.0f : 1.2f;
         g.drawLine(innerPoint.x, innerPoint.y, outerPoint.x, outerPoint.y, thickness);
     }
@@ -553,18 +526,14 @@ void PluginEditor::drawPeakLED(juce::Graphics& g, float x, float y)
 
     if (peakActive)
     {
-        // Glow effect
         g.setColour(juce::Colours::red.withAlpha(0.3f));
         g.fillEllipse(ledRect.expanded(3.0f));
         g.setColour(juce::Colours::red.withAlpha(0.5f));
         g.fillEllipse(ledRect.expanded(1.5f));
-
-        // Bright red LED
         g.setColour(juce::Colours::red);
     }
     else
     {
-        // Dim dark red
         g.setColour(juce::Colour(0xFF440000));
     }
 
