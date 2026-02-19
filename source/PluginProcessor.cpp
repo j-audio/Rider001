@@ -1,252 +1,112 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <cmath>
 
-//==============================================================================
 PluginProcessor::PluginProcessor()
-     : AudioProcessor (BusesProperties()
-                     #if ! JucePlugin_IsMidiEffect
-                      #if ! JucePlugin_IsSynth
-                       .withInput  ("Input",     juce::AudioChannelSet::stereo(), true)
-                      #endif
-                       .withOutput ("Output",    juce::AudioChannelSet::stereo(), true)
-                       .withInput  ("Sidechain", juce::AudioChannelSet::stereo(), true)
-                     #endif
-                       )
-{
-}
+    : AudioProcessor (BusesProperties()
+        .withInput  ("Input",     juce::AudioChannelSet::stereo(), true)
+        .withOutput ("Output",    juce::AudioChannelSet::stereo(), true)
+        .withInput  ("Sidechain", juce::AudioChannelSet::stereo(), true))
+{}
 
-PluginProcessor::~PluginProcessor()
-{
-}
+PluginProcessor::~PluginProcessor() {}
 
-//==============================================================================
-const juce::String PluginProcessor::getName() const
-{
-    return JucePlugin_Name;
-}
-
-bool PluginProcessor::acceptsMidi() const
-{
-   #if JucePlugin_WantsMidiInput
-    return true;
-   #else
-    return false;
-   #endif
-}
-
-bool PluginProcessor::producesMidi() const
-{
-   #if JucePlugin_ProducesMidiOutput
-    return true;
-   #else
-    return false;
-   #endif
-}
-
-bool PluginProcessor::isMidiEffect() const
-{
-   #if JucePlugin_IsMidiEffect
-    return true;
-   #else
-    return false;
-   #endif
-}
-
-double PluginProcessor::getTailLengthSeconds() const
-{
-    return 0.0;
-}
-
-int PluginProcessor::getNumPrograms()
-{
-    return 1;   // NB: some hosts don't cope very well if you tell them there are 0 programs,
-                // so this should be at least 1, even if you're not really implementing programs.
-}
-
-int PluginProcessor::getCurrentProgram()
-{
-    return 0;
-}
-
-void PluginProcessor::setCurrentProgram (int index)
-{
-    juce::ignoreUnused (index);
-}
-
-const juce::String PluginProcessor::getProgramName (int index)
-{
-    juce::ignoreUnused (index);
-    return {};
-}
-
-void PluginProcessor::changeProgramName (int index, const juce::String& newName)
-{
-    juce::ignoreUnused (index, newName);
-}
-
-//==============================================================================
 void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    // Use this method as the place to do any pre-playback
-    // initialisation that you need..
-    juce::ignoreUnused (samplesPerBlock);
-
-    // Reset the gain smoother with a 0.05 second (50ms) ramp
+    currentSampleRate = sampleRate;
     smoothedGain.reset(sampleRate, 0.05);
     smoothedGain.setCurrentAndTargetValue(1.0f);
-}
-
-void PluginProcessor::releaseResources()
-{
-    // When playback stops, you can use this as an opportunity to free up any
-    // spare memory, etc.
-}
-
-bool PluginProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
-{
-  #if JucePlugin_IsMidiEffect
-    juce::ignoreUnused (layouts);
-    return true;
-  #else
-    // 1. Main Output must be Stereo
-    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
-        return false;
-
-    // 2. Main Input must match Output (Stereo)
-   #if ! JucePlugin_IsSynth
-    if (layouts.getMainOutputChannelSet() != layouts.getMainInputChannelSet())
-        return false;
-   #endif
-
-    // 3. Sidechain Check
-    // We check if the Sidechain bus (index 1) exists and is valid
-    // We allow it to be Disabled OR Stereo.
-    if (layouts.inputBuses.size() > 1)
-    {
-        auto sidechain = layouts.inputBuses.getReference(1);
-        if (! sidechain.isDisabled() && sidechain != juce::AudioChannelSet::stereo())
-            return false;
-    }
-
-    return true;
-  #endif
+    double blocksPerSecond = sampleRate / static_cast<double>(samplesPerBlock);
+    macroPeakRelease = static_cast<float>(std::exp(-1.0 / (2.0 * blocksPerSecond)));
+    currentMacroPeak = 0.0001f;
 }
 
 void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
-    juce::ignoreUnused (midiMessages);
-
     juce::ScopedNoDenormals noDenormals;
-    auto totalNumInputChannels  = getTotalNumInputChannels();
-    auto totalNumOutputChannels = getTotalNumOutputChannels();
-
-    // 1. Clear extra channels to prevent noise/feedback
-    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
-        buffer.clear (i, 0, buffer.getNumSamples());
-
-    // --- GAIN MATCHING GUTS START HERE ---
-
-    // 2. Separate the Main (Wet) and Sidechain (Dry) buffers
     auto mainBuffer = getBusBuffer(buffer, true, 0); 
     auto sidechainBuffer = getBusBuffer(buffer, true, 1);
+    auto totalNumOutputChannels = getTotalNumOutputChannels();
 
-    // 3. Measure input levels (RMS)
-    float dryRMS   = sidechainBuffer.getRMSLevel(0, 0, sidechainBuffer.getNumSamples());
+    float dryRMS = sidechainBuffer.getRMSLevel(0, 0, sidechainBuffer.getNumSamples());
     float inputRMS = mainBuffer.getRMSLevel(0, 0, mainBuffer.getNumSamples());
 
-    // Store sidechain level for UI
-    sidechainBusLevel.store(dryRMS);
-
-    float gainFactor;
-
-    // POINT 1 FIX: BYPASS IF INPUT IS SILENT
-    // If the Main Input is practically silent (< -100dB), don't try to boost it.
-    // Just pass it through at Unity Gain (1.0).
-    if (inputRMS < 0.00001f)
-    {
-        gainFactor = 1.0f;
-    }
-    else
-    {
-        // Normal Operation: Match Sidechain to Input
-        
-        // If Sidechain is silent, we gate to 0 (Silence)
-        if (dryRMS < 0.00001f)
-        {
-            gainFactor = 0.0f;
-        }
-        else
-        {
-            // Calculate Ratio
-            gainFactor = dryRMS / (inputRMS + 0.00001f);
-            
-            // POINT 3 FIX: UNCAP POSITIVE GAIN
-            // Previously capped at 4.0 (12dB). Now capped at 32.0 (approx +30dB).
-            // This allows "Full Range" action while preventing speaker blowouts.
-            if (gainFactor > 32.0f) gainFactor = 32.0f;
-        }
+    float dryPeak = 0.0f;
+    float inputPeak = 0.0f;
+    for (int ch = 0; ch < mainBuffer.getNumChannels(); ++ch) {
+        dryPeak = juce::jmax(dryPeak, sidechainBuffer.getMagnitude(ch, 0, sidechainBuffer.getNumSamples()));
+        inputPeak = juce::jmax(inputPeak, mainBuffer.getMagnitude(ch, 0, mainBuffer.getNumSamples()));
     }
 
-    // Store gain in dB — explicit zero guard prevents log(0) = -inf
-    if (gainFactor <= 0.00001f)
-        currentGainDb.store(-100.0f);
-    else
-        currentGainDb.store(20.0f * std::log10(gainFactor));
+    if (dryRMS > currentMacroPeak) currentMacroPeak = dryRMS; 
+    else currentMacroPeak *= macroPeakRelease; 
 
-    // 6. Set the target value for the smoother
+    float gainFactor = 1.0f;
+    int mode = currentMode.load();
+
+    if (inputRMS >= 0.00001f && dryRMS >= 0.00001f)
+    {
+        float desiredTargetLevel = dryRMS; 
+
+        if (mode == 2) { // SPACE
+            float thresholdX = currentMacroPeak * 0.25f;  
+            float thresholdY = currentMacroPeak * 0.01f;  
+            if (dryRMS < thresholdX && dryRMS > thresholdY)
+                desiredTargetLevel = thresholdX * std::sqrt(dryRMS / thresholdX);
+        }
+
+        float rawTargetGain = desiredTargetLevel / (inputRMS + 0.00001f);
+
+        if (mode == 3) { // PUNCH
+            float dryCrest = dryPeak / (dryRMS + 0.00001f);
+            float inputCrest = inputPeak / (inputRMS + 0.00001f);
+            float loudnessComp = 1.0f + (1.0f - juce::jmin(1.0f, dryPeak));
+
+            if (dryCrest > inputCrest + 0.05f) {
+                rawTargetGain *= (dryCrest / inputCrest) * (1.0f + (0.15f * loudnessComp));
+            } else if (std::abs(dryCrest - inputCrest) <= 0.05f && dryCrest > 2.0f) {
+                rawTargetGain *= 1.0f + (0.12f * dryCrest * loudnessComp);
+            }
+        }
+
+        if (mode == 2 && rawTargetGain < 1.0f) rawTargetGain = 1.0f; 
+        gainFactor = juce::jmin(rawTargetGain, 16.0f); 
+    }
+
+    float smoothingTime = 0.050f;
+    if (mode == 1)      smoothingTime = (gainFactor < smoothedGain.getCurrentValue()) ? 0.015f : 0.030f; 
+    else if (mode == 2) smoothingTime = (gainFactor < smoothedGain.getCurrentValue()) ? 0.050f : 0.250f; 
+    else if (mode == 3) smoothingTime = (gainFactor < smoothedGain.getCurrentValue()) ? 0.002f : 0.025f; 
+
+    smoothedGain.reset(currentSampleRate, smoothingTime);
     smoothedGain.setTargetValue(gainFactor);
 
-    // 7. Apply the smoothed gain sample-by-sample to the Main audio
-    for (int sample = 0; sample < mainBuffer.getNumSamples(); ++sample)
-    {
-        float currentGain = smoothedGain.getNextValue();
-        for (int channel = 0; channel < mainBuffer.getNumChannels(); ++channel)
-        {
-            auto* channelData = mainBuffer.getWritePointer(channel);
-            channelData[sample] *= currentGain;
-        }
-    }
-
-    // Measure output AFTER gain — this is what the Output meter displays
-    mainBusLevel.store(mainBuffer.getRMSLevel(0, 0, mainBuffer.getNumSamples()));
-
-    // --- GAIN MATCHING GUTS END HERE ---
-
-    // 8. Apply soft clipping to prevent output clipping (tanh limits to ±1.0)
-    for (int channel = 0; channel < totalNumOutputChannels; ++channel)
-    {
-        auto* channelData = buffer.getWritePointer(channel);
-        for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
-        {
-            channelData[sample] = std::tanh(channelData[sample]);
+    for (int sample = 0; sample < buffer.getNumSamples(); ++sample) {
+        float g = smoothedGain.getNextValue();
+        for (int ch = 0; ch < totalNumOutputChannels; ++ch) {
+            float* data = buffer.getWritePointer(ch);
+            data[sample] = std::tanh(data[sample] * g);
         }
     }
 }
 
-//==============================================================================
-bool PluginProcessor::hasEditor() const
-{
-    return true; // (change this to false if you choose to not supply an editor)
+bool PluginProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const {
+    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo()) return false;
+    return layouts.getMainOutputChannelSet() == layouts.getMainInputChannelSet();
 }
 
-juce::AudioProcessorEditor* PluginProcessor::createEditor()
-{
-    return new PluginEditor (*this);
-}
-
-//==============================================================================
-void PluginProcessor::getStateInformation (juce::MemoryBlock& destData)
-{
-    juce::ignoreUnused (destData);
-}
-
-void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
-{
-    juce::ignoreUnused (data, sizeInBytes);
-}
-
-//==============================================================================
-juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
-{
-    return new PluginProcessor();
-}
+void PluginProcessor::releaseResources() {}
+const juce::String PluginProcessor::getName() const { return "J-RIDER"; }
+bool PluginProcessor::hasEditor() const { return true; }
+juce::AudioProcessorEditor* PluginProcessor::createEditor() { return new PluginEditor (*this); }
+bool PluginProcessor::acceptsMidi() const { return false; }
+bool PluginProcessor::producesMidi() const { return false; }
+double PluginProcessor::getTailLengthSeconds() const { return 0.0; }
+int PluginProcessor::getNumPrograms() { return 1; }
+int PluginProcessor::getCurrentProgram() { return 0; }
+void PluginProcessor::setCurrentProgram (int index) {}
+const juce::String PluginProcessor::getProgramName (int index) { return {}; }
+void PluginProcessor::changeProgramName (int index, const juce::String& newName) {}
+void PluginProcessor::getStateInformation (juce::MemoryBlock& destData) {}
+void PluginProcessor::setStateInformation (const void* data, int sizeInBytes) {}
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new PluginProcessor(); }
