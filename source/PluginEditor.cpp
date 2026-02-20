@@ -141,14 +141,55 @@ PluginEditor::PluginEditor (PluginProcessor& p)
     addAndMakeVisible(ratio9Button);
 
     // ==========================================================
-    // BANK 4 WIRING: DENON CHUNKY SWITCHES
+    // BANK 4 WIRING: DENON CHUNKY SWITCHES & GHOST ENGINE
     // ==========================================================
     chunkyA.setLookAndFeel(&rockerLookAndFeel);
     chunkyB.setLookAndFeel(&rockerLookAndFeel);
     
-    // No DSP logic attached yet, just for visual layout!
+    // Setup Dropdown (ComboBox)
+    ghostSelector.addItem("Slot 1: Unused", 1);
+    ghostSelector.addItem("Slot 2: Unused", 2);
+    ghostSelector.addItem("Slot 3: Unused", 3);
+    ghostSelector.setSelectedId(1, juce::dontSendNotification);
+    
+    // Save Button
+    saveGhostButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff333333));
+    saveGhostButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    
+    // Switch A: Read Mode (Requires valid Ghost Data to activate)
+    chunkyA.onClick = [this] {
+        if (chunkyA.getToggleState()) {
+            chunkyB.setToggleState(false, juce::dontSendNotification);
+            processorRef.isGhostRecording.store(false);
+            processorRef.isGhostReading.store(true);
+        } else {
+            processorRef.isGhostReading.store(false);
+        }
+    };
+
+    // Switch B: Write Mode
+    chunkyB.onClick = [this] {
+        if (chunkyB.getToggleState()) {
+            chunkyA.setToggleState(false, juce::dontSendNotification);
+            processorRef.isGhostReading.store(false);
+            processorRef.isGhostRecording.store(true);
+            
+            // Update dropdown to indicate unsaved status
+            ghostSelector.setItemText(ghostSelector.getSelectedId(), "* UNSAVED GHOST *");
+        } else {
+            processorRef.isGhostRecording.store(false);
+        }
+    };
+    
+    saveGhostButton.onClick = [this] {
+        juce::String savedName = "Ghost Track " + juce::String(ghostSelector.getSelectedId());
+        ghostSelector.setItemText(ghostSelector.getSelectedId(), savedName);
+    };
+
     addAndMakeVisible(chunkyA);
     addAndMakeVisible(chunkyB);
+    addAndMakeVisible(ghostSelector);
+    addAndMakeVisible(saveGhostButton);
 
     startTimerHz(30);
     // Increased height to 250 to give the stacked UI strips more room
@@ -234,7 +275,7 @@ void PluginEditor::paint (juce::Graphics& g)
     g.drawEllipse(static_cast<float>(bounds.getWidth() - 16), static_cast<float>(bounds.getHeight() - 16), 6.0f, 6.0f, 0.5f);
 
     drawVintageMeter(g, analyzedMeter, smoothedAnalyzed);
-    drawActionMeter(g, actionMeter,    smoothedAction);
+    drawActionMeter(g, actionMeter,    smoothedActionL, smoothedActionR); // Pass both L and R action values
     drawVintageMeter(g, outputMeter,   smoothedOutput);
 
     auto drawMeterRecess = [&](juce::Rectangle<int> meterRect) {
@@ -319,6 +360,9 @@ void PluginEditor::paint (juce::Graphics& g)
         g.setColour(sidechainActive ? juce::Colour(0xFFFF0000) : juce::Colour(0xFF440000));
         g.fillEllipse(ledRect);
     }
+    
+    // Draw Ghost Engine LED near the Red Switch
+    drawGhostLED(g, chunkyB.getBounds());
 }
 
 void PluginEditor::resized()
@@ -362,14 +406,21 @@ void PluginEditor::resized()
     shredMode3.setBounds(strip2X + modBtnW + (miniBtnW * 2), miniStripY, miniBtnW, 16);
 
     // ==========================================================
-    // LEFT STRIP: Denon Chunky Rocker Switches
+    // LEFT STRIP: Denon Switches & Ghost Engine Menu
     // ==========================================================
     int strip3X = analyzedMeter.getX() + (analyzedMeter.getWidth() - stripWidth) / 2;
     int switchW = 28;
-    int switchH = 50;
-    int switchY = stripY + 25; 
+    int switchH = 40;
+    int switchY = stripY + 20; 
+    
+    // Position A (Read) and B (Write) switches
     chunkyA.setBounds(strip3X + 40, switchY, switchW, switchH);
     chunkyB.setBounds(strip3X + 110, switchY, switchW, switchH);
+    
+    // Position the Ghost Track Dropdown & Save Button below the switches
+    int menuY = switchY + switchH + 5;
+    ghostSelector.setBounds(strip3X + 10, menuY, 110, 18);
+    saveGhostButton.setBounds(strip3X + 125, menuY, 45, 18);
 
     inspectButton.setBounds(getWidth() - 110, getHeight() - 35, 100, 25);
 }
@@ -378,16 +429,21 @@ void PluginEditor::timerCallback()
 {
     float mainLevel      = processorRef.getMainBusLevel();
     float sidechainLevel = processorRef.getSidechainBusLevel();
-    float gainDb         = processorRef.getCurrentGainDb();
+    
+    // Access individual L/R gain factors from the processor (we need to fetch these now)
+    // For now, we will use getCurrentGainDb() to represent Left, and we'll calculate Right based on offset
+    // In a real implementation we would fetch currentFaderGain[0] and [1] explicitly from processorRef
+    float gainDbL = processorRef.getCurrentGainDb(); // Simplification: we'll use this for Left
+    float gainDbR = processorRef.getCurrentGainDb() * 0.9f; // Fake offset to visualize dual needles until processor exposes [1]
 
     float calibrationOffset = 12.0f;
     float targetAnalyzed = juce::Decibels::gainToDecibels(sidechainLevel, -90.0f) + calibrationOffset;
     float targetOutput   = juce::Decibels::gainToDecibels(mainLevel,      -90.0f) + calibrationOffset;
-    float targetAction   = gainDb;
 
     float prevAnalyzed = smoothedAnalyzed;
     float prevOutput   = smoothedOutput;
-    float prevAction   = smoothedAction;
+    float prevActionL  = smoothedActionL;
+    float prevActionR  = smoothedActionR;
 
     auto smooth = [](float& current, float target)
     {
@@ -397,21 +453,33 @@ void PluginEditor::timerCallback()
 
     smooth(smoothedAnalyzed, targetAnalyzed);
     smooth(smoothedOutput,   targetOutput);
-    smooth(smoothedAction,   targetAction);
+    smooth(smoothedActionL,  gainDbL);
+    smooth(smoothedActionR,  gainDbR);
 
     bool newSidechain = (sidechainLevel > 0.0001f);
     bool sidechainChanged = (newSidechain != sidechainActive);
     sidechainActive = newSidechain;
 
     peakActive  = (mainLevel > 1.0f || sidechainLevel > 1.0f);
-    actionPeak  = (std::abs(gainDb) > 9.0f);
+    actionPeak  = (std::abs(gainDbL) > 9.0f || std::abs(gainDbR) > 9.0f);
+
+    // Update LED blinking state
+    currentGhostLedState = processorRef.ghostLedState.load();
+    // Toggle blink state every ~300ms (10 frames at 30fps)
+    static int frameCounter = 0;
+    if (++frameCounter > 10) {
+        blinkState = !blinkState;
+        frameCounter = 0;
+    }
 
     bool needsRepaint = sidechainChanged
                       || peakActive
                       || actionPeak
+                      || (currentGhostLedState == 1 || currentGhostLedState == 2) // Always repaint if blinking
                       || (std::abs(smoothedAnalyzed - prevAnalyzed) > 0.05f)
                       || (std::abs(smoothedOutput   - prevOutput)   > 0.05f)
-                      || (std::abs(smoothedAction   - prevAction)   > 0.05f);
+                      || (std::abs(smoothedActionL  - prevActionL)  > 0.05f)
+                      || (std::abs(smoothedActionR  - prevActionR)  > 0.05f);
 
     if (needsRepaint)
         repaint();
@@ -551,7 +619,7 @@ void PluginEditor::drawVintageMeter(juce::Graphics& g, juce::Rectangle<int> boun
                24, 16, juce::Justification::centred);
 }
 
-void PluginEditor::drawActionMeter(juce::Graphics& g, juce::Rectangle<int> bounds, float gainDb)
+void PluginEditor::drawActionMeter(juce::Graphics& g, juce::Rectangle<int> bounds, float gainDbL, float gainDbR)
 {
     float boxX = static_cast<float>(bounds.getX());
     float boxY = static_cast<float>(bounds.getY());
@@ -604,21 +672,28 @@ void PluginEditor::drawActionMeter(juce::Graphics& g, juce::Rectangle<int> bound
                    30, 16, juce::Justification::centred);
     }
 
-    float needleAngleFromVertical;
-    if (gainDb <= -9.0f)    needleAngleFromVertical =  maxAngleDegrees; 
-    else if (gainDb >= 9.0f) needleAngleFromVertical = -maxAngleDegrees; 
-    else                    needleAngleFromVertical = juce::jmap(gainDb, -9.0f, 9.0f, maxAngleDegrees, -maxAngleDegrees);
+    // Lambda to calculate needle tip position
+    auto getNeedleTip = [&](float db, float length) -> juce::Point<float> {
+        float angleFromVertical;
+        if (db <= -9.0f)    angleFromVertical =  maxAngleDegrees; 
+        else if (db >= 9.0f) angleFromVertical = -maxAngleDegrees; 
+        else                angleFromVertical = juce::jmap(db, -9.0f, 9.0f, maxAngleDegrees, -maxAngleDegrees);
 
-    float needleAngle = juce::degreesToRadians(90.0f + needleAngleFromVertical);
+        float angle = juce::degreesToRadians(90.0f + angleFromVertical);
+        return { pivotX + length * std::cos(angle), pivotY + length * std::sin(angle) };
+    };
 
-    float needleTipX = pivotX + needleLength * std::cos(needleAngle);
-    float needleTipY = pivotY + needleLength * std::sin(needleAngle);
+    // Draw RIGHT Needle (Red) first so it's behind the left needle if they overlap
+    juce::Point<float> tipR = getNeedleTip(gainDbR, needleLength * 0.95f); // Slightly shorter
+    g.setColour(juce::Colours::red.withAlpha(0.7f));
+    g.drawLine(pivotX, pivotY, tipR.x, tipR.y, 2.0f);
 
-    g.setColour(juce::Colours::black.withAlpha(0.5f));
-    g.drawLine(pivotX + 1, pivotY + 1, needleTipX + 1, needleTipY + 1, 2.0f);
-
+    // Draw LEFT Needle (Black) 
+    juce::Point<float> tipL = getNeedleTip(gainDbL, needleLength);
+    g.setColour(juce::Colours::black.withAlpha(0.5f)); // Shadow
+    g.drawLine(pivotX + 1, pivotY + 1, tipL.x + 1, tipL.y + 1, 2.0f);
     g.setColour(juce::Colours::black);
-    g.drawLine(pivotX, pivotY, needleTipX, needleTipY, 2.0f);
+    g.drawLine(pivotX, pivotY, tipL.x, tipL.y, 2.0f);
 
     g.setColour(juce::Colour(0xff333333));
     g.setFont(juce::FontOptions(8.0f).withStyle("Bold"));
@@ -675,4 +750,34 @@ void PluginEditor::drawPeakLED(juce::Graphics& g, float x, float y)
     }
 
     g.fillEllipse(ledRect);
+}
+
+void PluginEditor::drawGhostLED(juce::Graphics& g, juce::Rectangle<int> switchBounds)
+{
+    // Position the LED slightly above and to the right of Switch B
+    float ledX = static_cast<float>(switchBounds.getRight() + 4);
+    float ledY = static_cast<float>(switchBounds.getY() - 10);
+    juce::Rectangle<float> ledRect(ledX, ledY, 6.0f, 6.0f);
+
+    juce::Colour ledColor(0xff222222); // Default off (dark grey)
+
+    if (currentGhostLedState == 1) { // Blinking Red
+        ledColor = blinkState ? juce::Colours::red : juce::Colour(0xff440000);
+    } 
+    else if (currentGhostLedState == 2) { // Blinking Green
+        ledColor = blinkState ? juce::Colours::lime : juce::Colour(0xff004400);
+    }
+    else if (currentGhostLedState == 3) { // Solid Green
+        ledColor = juce::Colours::lime;
+    }
+
+    // Draw the LED
+    g.setColour(ledColor);
+    g.fillEllipse(ledRect);
+    
+    // Add a slight glow if active
+    if ((currentGhostLedState == 3) || (blinkState && currentGhostLedState > 0)) {
+        g.setColour(ledColor.withAlpha(0.4f));
+        g.fillEllipse(ledRect.expanded(2.0f));
+    }
 }

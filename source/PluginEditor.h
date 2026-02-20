@@ -197,9 +197,11 @@ private:
     juce::ToggleButton ratio6Button { "6:1" };
     juce::ToggleButton ratio9Button { "9:1" };
 
-    // Bank 4: Denon Chunky Switches
-    juce::ToggleButton chunkyA { "A" }; // Black
-    juce::ToggleButton chunkyB { "B" }; // Red
+    // Bank 4: Denon Chunky Switches & Ghost Engine UI
+    juce::ToggleButton chunkyA { "A" }; // Black (Read Mode)
+    juce::ToggleButton chunkyB { "B" }; // Red (Write Mode)
+    juce::ComboBox ghostSelector;       // Dropdown menu for Ghost Tracks
+    juce::TextButton saveGhostButton { "SAVE" }; // Button to save current track
 
     juce::Rectangle<int> analyzedMeter;
     juce::Rectangle<int> actionMeter;
@@ -211,12 +213,18 @@ private:
 
     float smoothedAnalyzed { -90.0f };
     float smoothedOutput   { -90.0f };
-    float smoothedAction   {   0.0f };
+    // Track L and R action separately for the dual needles
+    float smoothedActionL  {   0.0f };
+    float smoothedActionR  {   0.0f };
+
+    int currentGhostLedState { 0 }; // Local copy of processor state
+    bool blinkState { false };      // Used for blinking logic
 
     void drawVintageMeter(juce::Graphics& g, juce::Rectangle<int> bounds, float levelDb);
-    void drawActionMeter(juce::Graphics& g, juce::Rectangle<int> bounds, float gainDb);
+    void drawActionMeter(juce::Graphics& g, juce::Rectangle<int> bounds, float gainDbL, float gainDbR);
     void drawMeterArc(juce::Graphics& g, juce::Point<float> arcCenter, float arcRadius, juce::Rectangle<float> meterArea);
     void drawPeakLED(juce::Graphics& g, float x, float y);
+    void drawGhostLED(juce::Graphics& g, juce::Rectangle<int> switchBounds);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginEditor)
 };

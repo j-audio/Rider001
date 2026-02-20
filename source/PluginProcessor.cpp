@@ -102,21 +102,24 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     sidechainBusLevel.store(std::max(dryRMS[0], dryRMS[1]));
 
     // ==========================================================
-    // TEMPO SYNC ENGINE (For PUNCH Mode Release)
+    // TEMPO & PLAYHEAD ENGINE
     // ==========================================================
     double currentBPM = 120.0;
+    double currentPPQ = 0.0;
+    bool isPlaying = false;
+
     if (auto* activePlayHead = getPlayHead()) {
         if (auto positionInfo = activePlayHead->getPosition()) {
-            if (positionInfo->getBpm().hasValue()) {
-                currentBPM = *positionInfo->getBpm();
-                if (currentBPM <= 0.0) currentBPM = 120.0;
-            }
+            if (positionInfo->getBpm().hasValue()) currentBPM = *positionInfo->getBpm();
+            if (positionInfo->getPpqPosition().hasValue()) currentPPQ = *positionInfo->getPpqPosition();
+            isPlaying = positionInfo->getIsPlaying();
         }
     }
     
     float secondsPerQuarter = 60.0f / (float)currentBPM;
     float secondsPer128th = secondsPerQuarter / 32.0f;
     float musicalRelease = std::clamp(secondsPer128th * (2.0f / 3.0f), 0.002f, 0.040f);
+    
 
     int mode = currentMode.load();
     int mod = currentModifier.load(); 
@@ -124,10 +127,69 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     int shredMode = currentShredMode.load();
 
     // ==========================================================
+    // THE GHOST ENGINE: RECORDING & SYNC LOGIC
+    // ==========================================================
+    bool writeMode = isGhostRecording.load();
+    bool readMode = isGhostReading.load();
+    
+    // We calculate a safe array index based on 16th note resolution (4 logs per beat)
+    int ppqIndex = (int)(currentPPQ * 4.0); 
+    
+    if (writeMode) 
+    {
+        if (!isPlaying) {
+            ghostLedState.store(3); // Paused = Solid Green
+        } 
+        else if (currentPPQ == 0.0) {
+            ghostLedState.store(1); // Armed at start = Blinking Red, waiting for play
+        }
+        else 
+        {
+            // Safety Append Logic (The "Punch-In")
+            // Allow recording if we are exactly where we left off, OR if the memory map is empty.
+            bool isAppending = (ghostMapL.size() == 0 || ppqIndex <= ghostMapL.size() + 2);
+
+            if (isAppending) 
+            {
+                ghostLedState.store(2); // Recording = Blinking Green
+                
+                // Expand the memory vector to fit the new timestamp
+                if (ppqIndex >= ghostMapL.size()) {
+                    ghostMapL.resize(ppqIndex + 1, 0.0f);
+                    ghostMapR.resize(ppqIndex + 1, 0.0f);
+                }
+                
+                // Write the master bus volume into the timeline memory
+                ghostMapL[ppqIndex] = inputRMS[0];
+                ghostMapR[ppqIndex] = inputRMS[1];
+                
+                lastRecordedPPQ.store(currentPPQ);
+            } 
+            else {
+                // Playhead skipped forward over empty space! Abort recording.
+                ghostLedState.store(1); // Blinking Red Error
+            }
+        }
+    } 
+    else {
+        ghostLedState.store(0); // Off
+    }
+
+    // ==========================================================
     // DUAL MONO TARGET CALCULATION
     // ==========================================================
     for (int ch = 0; ch < numChannels; ++ch) 
     {
+        // --- THE GHOST OVERRIDE ---
+        float ghostTarget = 0.0f;
+        bool hasGhostData = false;
+        
+        // Safety check: Ensure we aren't in negative pre-roll time, and memory exists
+        if (readMode && isPlaying && ppqIndex >= 0 && ppqIndex < ghostMapL.size()) {
+            hasGhostData = true;
+            ghostTarget = (ch == 0) ? ghostMapL[ppqIndex] : ghostMapR[ppqIndex];
+        }
+
         // Smart Macro Peak Tracker (Per Channel)
         if (dryRMS[ch] > currentMacroPeak[ch]) {
             currentMacroPeak[ch] = dryRMS[ch]; 
@@ -138,7 +200,13 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 
         if (inputRMS[ch] >= 0.00001f)
         {
-            if (dryRMS[ch] < 0.00001f) {
+            // IF GHOST IS ACTIVE: Ignore the sidechain, ride strictly to the recorded timeline curve.
+            if (hasGhostData) {
+                float rawTargetGain = ghostTarget / (inputRMS[ch] + 0.00001f);
+                gainFactor[ch] = std::clamp(rawTargetGain, 0.0f, 32.0f);
+            }
+            // OTHERWISE: Run the standard J-RIDER Sidechain Engine
+            else if (dryRMS[ch] < 0.00001f) {
                 gainFactor[ch] = 0.0f;
             } else {
                 float desiredTargetLevel = dryRMS[ch]; 

@@ -2,6 +2,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <atomic>
+#include <vector>
 
 #if (MSVC)
 #include "ipps.h"
@@ -70,7 +71,22 @@ public:
     // The SHRED Trilogy
     std::atomic<int> currentShredMode { 1 }; // 1=Wavefolder, 2=TempoCrush, 3=BlackHole
     float heldSample[8] { 0.0f }; // Memory for the S&H algorithm 
-    int holdCounter[8] { 0 };     // Counter for the S&H algorithm
+    int holdCounter[8] { 0 };   
+    
+    // ==========================================================
+    // THE GHOST ENGINE MEMORY
+    // ==========================================================
+    std::atomic<bool> isGhostRecording { false }; 
+    std::atomic<bool> isGhostReading { false };   
+
+    // We store the timeline as an array of RMS values. 
+    // We log the volume every 0.25 PPQ (16th note resolution).
+    std::vector<float> ghostMapL; 
+    std::vector<float> ghostMapR;
+    
+    // UI Feedback States
+    std::atomic<int> ghostLedState { 0 }; // 0=Off, 1=Blinking Red, 2=Blinking Green, 3=Solid Green
+    std::atomic<double> lastRecordedPPQ { 0.0 };// Counter for the S&H algorithm
 
 private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginProcessor)
