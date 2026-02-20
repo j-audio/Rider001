@@ -22,33 +22,26 @@ PluginEditor::PluginEditor (PluginProcessor& p)
     spaceButton.setLookAndFeel(&vintageLookAndFeel);
     punchButton.setLookAndFeel(&vintageLookAndFeel);
 
-    // Custom Mutual Exclusivity logic allowing them to be turned OFF
     voxButton.onClick = [this] {
         if (voxButton.getToggleState()) {
             spaceButton.setToggleState(false, juce::dontSendNotification);
             punchButton.setToggleState(false, juce::dontSendNotification);
             processorRef.currentMode.store(1);
-        } else {
-            processorRef.currentMode.store(0); // Return to Base Mode
-        }
+        } else { processorRef.currentMode.store(0); }
     };
     spaceButton.onClick = [this] {
         if (spaceButton.getToggleState()) {
             voxButton.setToggleState(false, juce::dontSendNotification);
             punchButton.setToggleState(false, juce::dontSendNotification);
             processorRef.currentMode.store(2);
-        } else {
-            processorRef.currentMode.store(0); // Return to Base Mode
-        }
+        } else { processorRef.currentMode.store(0); }
     };
     punchButton.onClick = [this] {
         if (punchButton.getToggleState()) {
             voxButton.setToggleState(false, juce::dontSendNotification);
             spaceButton.setToggleState(false, juce::dontSendNotification);
             processorRef.currentMode.store(3);
-        } else {
-            processorRef.currentMode.store(0); // Return to Base Mode
-        }
+        } else { processorRef.currentMode.store(0); }
     };
 
     addAndMakeVisible(voxButton);
@@ -62,37 +55,57 @@ PluginEditor::PluginEditor (PluginProcessor& p)
     shredButton.setLookAndFeel(&purpleLookAndFeel);
     chopButton.setLookAndFeel(&purpleLookAndFeel);
 
-    // Custom Mutual Exclusivity logic allowing them to be turned OFF
     flipButton.onClick = [this] {
         if (flipButton.getToggleState()) {
             shredButton.setToggleState(false, juce::dontSendNotification);
             chopButton.setToggleState(false, juce::dontSendNotification);
             processorRef.currentModifier.store(1);
-        } else {
-            processorRef.currentModifier.store(0); // Return to Clean Mode
-        }
+        } else { processorRef.currentModifier.store(0); }
     };
     shredButton.onClick = [this] {
         if (shredButton.getToggleState()) {
             flipButton.setToggleState(false, juce::dontSendNotification);
             chopButton.setToggleState(false, juce::dontSendNotification);
             processorRef.currentModifier.store(2);
-        } else {
-            processorRef.currentModifier.store(0); // Return to Clean Mode
-        }
+        } else { processorRef.currentModifier.store(0); }
     };
     chopButton.onClick = [this] {
         if (chopButton.getToggleState()) {
             flipButton.setToggleState(false, juce::dontSendNotification);
             shredButton.setToggleState(false, juce::dontSendNotification);
             processorRef.currentModifier.store(3);
-        } else {
-            processorRef.currentModifier.store(0); // Return to Clean Mode
-        }
+        } else { processorRef.currentModifier.store(0); }
     };
+
     addAndMakeVisible(flipButton);
     addAndMakeVisible(shredButton);
     addAndMakeVisible(chopButton);
+
+    // ==========================================================
+    // BANK 3 WIRING: RATIO DIAGNOSTICS (RED)
+    // ==========================================================
+    ratio3Button.setLookAndFeel(&vintageLookAndFeel);
+    ratio6Button.setLookAndFeel(&vintageLookAndFeel);
+    ratio9Button.setLookAndFeel(&vintageLookAndFeel);
+
+    auto ratioClick = [this](int r, juce::ToggleButton* btn) {
+        if (btn->getToggleState()) {
+            if (btn != &ratio3Button) ratio3Button.setToggleState(false, juce::dontSendNotification);
+            if (btn != &ratio6Button) ratio6Button.setToggleState(false, juce::dontSendNotification);
+            if (btn != &ratio9Button) ratio9Button.setToggleState(false, juce::dontSendNotification);
+            processorRef.currentRatio.store(r);
+        } else {
+            processorRef.currentRatio.store(1); // Default 1:1 when all unclicked
+        }
+    };
+
+    ratio3Button.onClick = [this, ratioClick] { ratioClick(3, &ratio3Button); };
+    ratio6Button.onClick = [this, ratioClick] { ratioClick(6, &ratio6Button); };
+    ratio9Button.onClick = [this, ratioClick] { ratioClick(9, &ratio9Button); };
+
+    addAndMakeVisible(ratio3Button);
+    addAndMakeVisible(ratio6Button);
+    addAndMakeVisible(ratio9Button);
 
     startTimerHz(30);
     setSize (600, 220);
@@ -109,6 +122,10 @@ PluginEditor::~PluginEditor()
     flipButton.setLookAndFeel(nullptr);
     shredButton.setLookAndFeel(nullptr);
     chopButton.setLookAndFeel(nullptr);
+
+    ratio3Button.setLookAndFeel(nullptr);
+    ratio6Button.setLookAndFeel(nullptr);
+    ratio9Button.setLookAndFeel(nullptr);
 }
 
 void PluginEditor::paint (juce::Graphics& g)
@@ -190,40 +207,45 @@ void PluginEditor::paint (juce::Graphics& g)
     drawMeterRecess(actionMeter);
     drawMeterRecess(outputMeter);
 
-    // DRAW CONTROL STRIP 1
     int stripWidth = 180;
     int stripHeight = 36;
-    int strip1X = actionMeter.getX() + (actionMeter.getWidth() - stripWidth) / 2;
     int stripY = actionMeter.getBottom() + 15; 
 
+    // DRAW CONTROL STRIP 1 (CENTER)
+    int strip1X = actionMeter.getX() + (actionMeter.getWidth() - stripWidth) / 2;
     juce::Rectangle<int> strip1Area(strip1X, stripY, stripWidth, stripHeight);
-    
     g.setColour(juce::Colour(0xff0a0a0a));
     g.fillRect(strip1Area);
-    
     g.setColour(juce::Colour(0xff333333));
     g.drawLine(strip1X, stripY, strip1X + stripWidth, stripY, 1.0f);
     g.drawLine(strip1X, stripY, strip1X, stripY + stripHeight, 1.0f);
-    
     g.setColour(juce::Colour(0xff666666).withAlpha(0.5f));
     g.drawLine(strip1X, stripY + stripHeight, strip1X + stripWidth, stripY + stripHeight, 1.0f);
     g.drawLine(strip1X + stripWidth, stripY, strip1X + stripWidth, stripY + stripHeight, 1.0f);
 
-    // DRAW CONTROL STRIP 2
+    // DRAW CONTROL STRIP 2 (RIGHT)
     int strip2X = outputMeter.getX() + (outputMeter.getWidth() - stripWidth) / 2;
-    
     juce::Rectangle<int> strip2Area(strip2X, stripY, stripWidth, stripHeight);
-    
     g.setColour(juce::Colour(0xff0a0a0a));
     g.fillRect(strip2Area);
-    
     g.setColour(juce::Colour(0xff333333));
     g.drawLine(strip2X, stripY, strip2X + stripWidth, stripY, 1.0f);
     g.drawLine(strip2X, stripY, strip2X, stripY + stripHeight, 1.0f);
-    
     g.setColour(juce::Colour(0xff666666).withAlpha(0.5f));
     g.drawLine(strip2X, stripY + stripHeight, strip2X + stripWidth, stripY + stripHeight, 1.0f);
     g.drawLine(strip2X + stripWidth, stripY, strip2X + stripWidth, stripY + stripHeight, 1.0f);
+
+    // DRAW CONTROL STRIP 3 (LEFT - RATIO)
+    int strip3X = analyzedMeter.getX() + (analyzedMeter.getWidth() - stripWidth) / 2;
+    juce::Rectangle<int> strip3Area(strip3X, stripY, stripWidth, stripHeight);
+    g.setColour(juce::Colour(0xff0a0a0a));
+    g.fillRect(strip3Area);
+    g.setColour(juce::Colour(0xff333333));
+    g.drawLine(strip3X, stripY, strip3X + stripWidth, stripY, 1.0f);
+    g.drawLine(strip3X, stripY, strip3X, stripY + stripHeight, 1.0f);
+    g.setColour(juce::Colour(0xff666666).withAlpha(0.5f));
+    g.drawLine(strip3X, stripY + stripHeight, strip3X + stripWidth, stripY + stripHeight, 1.0f);
+    g.drawLine(strip3X + stripWidth, stripY, strip3X + stripWidth, stripY + stripHeight, 1.0f);
 
     // SCREEN-PRINT LABELS
     {
@@ -235,7 +257,7 @@ void PluginEditor::paint (juce::Graphics& g)
         int labelH = 20;
 
         g.drawText("ANALYZED", analyzedMeter.getX(), labelY, analyzedMeter.getWidth(), labelH, juce::Justification::centred);
-        g.drawText("OUTPUT",   outputMeter.getX(),   labelY, outputMeter.getWidth(),   labelH, juce::Justification::centred);
+        // "OUTPUT" text completely removed to unblock the purple buttons!
 
         juce::GlyphArrangement textGlyphs;
         textGlyphs.addLineOfText(labelFont, "ANALYZED", 0.0f, 0.0f);
@@ -279,6 +301,11 @@ void PluginEditor::resized()
     flipButton.setBounds(strip2X, stripY, buttonWidth, stripHeight);
     shredButton.setBounds(strip2X + buttonWidth, stripY, buttonWidth, stripHeight);
     chopButton.setBounds(strip2X + (buttonWidth * 2), stripY, buttonWidth, stripHeight);
+
+    int strip3X = analyzedMeter.getX() + (analyzedMeter.getWidth() - stripWidth) / 2;
+    ratio3Button.setBounds(strip3X, stripY, buttonWidth, stripHeight);
+    ratio6Button.setBounds(strip3X + buttonWidth, stripY, buttonWidth, stripHeight);
+    ratio9Button.setBounds(strip3X + (buttonWidth * 2), stripY, buttonWidth, stripHeight);
 
     inspectButton.setBounds(getWidth() - 110, getHeight() - 35, 100, 25);
 }

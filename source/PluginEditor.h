@@ -11,7 +11,6 @@ public:
     explicit PluginEditor (PluginProcessor&);
     ~PluginEditor() override;
 
-    //==============================================================================
     void paint (juce::Graphics&) override;
     void resized() override;
     void timerCallback() override;
@@ -22,20 +21,17 @@ private:
     juce::TextButton inspectButton { "Inspect the UI" };
 
     // ==========================================================
-    // VINTAGE LED BUTTON DESIGN (RED - THE ENGINE)
+    // VINTAGE LED BUTTON DESIGN (RED - ENGINE & RATIO)
     // ==========================================================
     class VintageButtonLookAndFeel : public juce::LookAndFeel_V4 {
     public:
         void drawToggleButton(juce::Graphics& g, juce::ToggleButton& button,
                               bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override {
             auto bounds = button.getLocalBounds().toFloat();
-            
-            // 1. Draw the text
             g.setColour(button.getToggleState() ? juce::Colours::white : juce::Colour(0xff888888));
             g.setFont(juce::FontOptions(12.0f).withStyle("Bold"));
             g.drawText(button.getName(), bounds.withTrimmedTop(16), juce::Justification::centred);
             
-            // 2. Draw the LED
             float ledWidth = 8.0f;
             float ledHeight = 4.0f;
             juce::Rectangle<float> ledRect((bounds.getWidth() - ledWidth) / 2.0f, 6.0f, ledWidth, ledHeight);
@@ -86,14 +82,18 @@ private:
     // Bank 1: The Engine (Red LEDs)
     juce::ToggleButton voxButton   { "VOX" };
     juce::ToggleButton spaceButton { "SPACE" };
-    juce::ToggleButton punchButton { "PUNCH" }; // Renamed from emptyButton
+    juce::ToggleButton punchButton { "PUNCH" };
 
     // Bank 2: The Modifiers (Purple LEDs)
     juce::ToggleButton flipButton  { "FLIP" };
     juce::ToggleButton shredButton { "SHRED" };
     juce::ToggleButton chopButton  { "CHOP" };
 
-    // Meter bounds
+    // Bank 3: The Ratio Diagnostics (Red LEDs)
+    juce::ToggleButton ratio3Button { "3:1" };
+    juce::ToggleButton ratio6Button { "6:1" };
+    juce::ToggleButton ratio9Button { "9:1" };
+
     juce::Rectangle<int> analyzedMeter;
     juce::Rectangle<int> actionMeter;
     juce::Rectangle<int> outputMeter;

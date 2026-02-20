@@ -64,6 +64,7 @@ public:
     // ==========================================================
     std::atomic<int> currentMode { 0 };     // 0=Base, 1=VOX, 2=SPACE, 3=PUNCH
     std::atomic<int> currentModifier { 0 }; // 0=Clean, 1=FLIP, 2=SHRED, 3=CHOP
+    std::atomic<int> currentRatio { 1 };
 
 private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginProcessor)
