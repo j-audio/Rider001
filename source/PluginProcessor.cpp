@@ -34,11 +34,15 @@ void PluginProcessor::changeProgramName (int index, const juce::String& newName)
 void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     currentSampleRate = sampleRate;
-    currentFaderGain = 1.0f; // Reset our analog fader on playback start
+    
+    // Reset Dual Mono Memories
+    currentFaderGain[0] = 1.0f;
+    currentFaderGain[1] = 1.0f;
+    currentMacroPeak[0] = 0.0001f;
+    currentMacroPeak[1] = 0.0001f;
 
     double blocksPerSecond = sampleRate / static_cast<double>(samplesPerBlock);
     macroPeakRelease = static_cast<float>(std::exp(-1.0 / (2.0 * blocksPerSecond)));
-    currentMacroPeak = 0.0001f;
 }
 
 void PluginProcessor::releaseResources() {}
@@ -67,30 +71,35 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         buffer.clear (i, 0, buffer.getNumSamples());
 
     auto mainBuffer = getBusBuffer(buffer, true, 0); 
-    
+    int numChannels = std::min(mainBuffer.getNumChannels(), 2); // Ensure we cap at stereo for our arrays
+
     // ==========================================================
-    // ABLETON CRASH FIX: Safely measure main input
+    // DUAL MONO MEASUREMENT ARRAYS
     // ==========================================================
-    float inputRMS = mainBuffer.getRMSLevel(0, 0, mainBuffer.getNumSamples());
-    float inputPeak = 0.0f;
-    for (int ch = 0; ch < mainBuffer.getNumChannels(); ++ch) {
-        inputPeak = juce::jmax(inputPeak, mainBuffer.getMagnitude(ch, 0, mainBuffer.getNumSamples()));
+    float inputRMS[2] = {0.0f, 0.0f};
+    float inputPeak[2] = {0.0f, 0.0f};
+    float dryRMS[2] = {0.0f, 0.0f};
+    float dryPeak[2] = {0.0f, 0.0f};
+    float gainFactor[2] = {1.0f, 1.0f};
+
+    for (int ch = 0; ch < numChannels; ++ch) {
+        inputRMS[ch] = mainBuffer.getRMSLevel(ch, 0, mainBuffer.getNumSamples());
+        inputPeak[ch] = mainBuffer.getMagnitude(ch, 0, mainBuffer.getNumSamples());
     }
 
-    float dryRMS = 0.0f;
-    float dryPeak = 0.0f;
-
-    // Safely measure sidechain ONLY if DAW provides it
     if (getBusCount(true) > 1 && getBus(true, 1)->isEnabled()) 
     {
         auto sidechainBuffer = getBusBuffer(buffer, true, 1);
-        dryRMS = sidechainBuffer.getRMSLevel(0, 0, sidechainBuffer.getNumSamples());
-        for (int ch = 0; ch < sidechainBuffer.getNumChannels(); ++ch) {
-            dryPeak = juce::jmax(dryPeak, sidechainBuffer.getMagnitude(ch, 0, sidechainBuffer.getNumSamples()));
+        int scChannels = sidechainBuffer.getNumChannels();
+        for (int ch = 0; ch < numChannels; ++ch) {
+            int scCh = (ch < scChannels) ? ch : 0; // Route mono sidechains safely to both L and R
+            dryRMS[ch] = sidechainBuffer.getRMSLevel(scCh, 0, sidechainBuffer.getNumSamples());
+            dryPeak[ch] = sidechainBuffer.getMagnitude(scCh, 0, sidechainBuffer.getNumSamples());
         }
     }
 
-    sidechainBusLevel.store(dryRMS);
+    // Update UI Sidechain Meter (Use the loudest channel)
+    sidechainBusLevel.store(std::max(dryRMS[0], dryRMS[1]));
 
     // ==========================================================
     // TEMPO SYNC ENGINE (For PUNCH Mode Release)
@@ -100,205 +109,192 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         if (auto positionInfo = activePlayHead->getPosition()) {
             if (positionInfo->getBpm().hasValue()) {
                 currentBPM = *positionInfo->getBpm();
-                if (currentBPM <= 0.0) currentBPM = 120.0; // Safety check
+                if (currentBPM <= 0.0) currentBPM = 120.0;
             }
         }
     }
     
-    // Calculate a 1/128th Triplet Note in seconds
     float secondsPerQuarter = 60.0f / (float)currentBPM;
     float secondsPer128th = secondsPerQuarter / 32.0f;
-    float musicalRelease = secondsPer128th * (2.0f / 3.0f);
-    
-    // Safety clamps: Keep it strictly between 2ms and 40ms
-    if (musicalRelease < 0.002f) musicalRelease = 0.002f;
-    if (musicalRelease > 0.040f) musicalRelease = 0.040f;
+    float musicalRelease = std::clamp(secondsPer128th * (2.0f / 3.0f), 0.002f, 0.040f);
 
-    // ==========================================================
-    // SMART MACRO PEAK TRACKER
-    // ==========================================================
-    if (dryRMS > currentMacroPeak) {
-        currentMacroPeak = dryRMS; // Instant Attack
-    } else {
-        currentMacroPeak *= macroPeakRelease; // 2-second Release
-    }
-    if (currentMacroPeak < 0.0001f) currentMacroPeak = 0.0001f;
-
-    float gainFactor = 1.0f;
     int mode = currentMode.load();
     int mod = currentModifier.load(); 
-    int ratio = currentRatio.load(); // Fetch the diagnostic ratio
+    int ratio = currentRatio.load(); 
+    int shredMode = currentShredMode.load();
 
-    if (inputRMS >= 0.00001f)
+    // ==========================================================
+    // DUAL MONO TARGET CALCULATION
+    // ==========================================================
+    for (int ch = 0; ch < numChannels; ++ch) 
     {
-        if (dryRMS < 0.00001f)
-        {
-            gainFactor = 0.0f;
+        // Smart Macro Peak Tracker (Per Channel)
+        if (dryRMS[ch] > currentMacroPeak[ch]) {
+            currentMacroPeak[ch] = dryRMS[ch]; 
+        } else {
+            currentMacroPeak[ch] *= macroPeakRelease; 
         }
-        else
+        if (currentMacroPeak[ch] < 0.0001f) currentMacroPeak[ch] = 0.0001f;
+
+        if (inputRMS[ch] >= 0.00001f)
         {
-            float desiredTargetLevel = dryRMS; 
+            if (dryRMS[ch] < 0.00001f) {
+                gainFactor[ch] = 0.0f;
+            } else {
+                float desiredTargetLevel = dryRMS[ch]; 
 
-            // ==========================================================
-            // SPACE MODE: EXAGGERATED EXPANSION
-            // ==========================================================
-            if (mode == 2) 
-            {
-                float thresholdX = currentMacroPeak * 0.25f;  
-                float thresholdY = currentMacroPeak * 0.01f;  
+                // SPACE MODE
+                if (mode == 2) {
+                    float thresholdX = currentMacroPeak[ch] * 0.25f;  
+                    float thresholdY = currentMacroPeak[ch] * 0.01f;  
+                    float spaceExponent = (ratio == 1) ? 0.5f : (1.0f / (float)ratio);
+
+                    if (dryRMS[ch] < thresholdX && dryRMS[ch] > thresholdY) {
+                        desiredTargetLevel = thresholdX * std::pow(dryRMS[ch] / thresholdX, spaceExponent);
+                    } 
+                    else if (dryRMS[ch] <= thresholdY && thresholdY > 0.00001f) {
+                        float maxMultiplier = std::pow(thresholdX / thresholdY, spaceExponent); 
+                        float fadeRatio = dryRMS[ch] / thresholdY; 
+                        float evaporatingMultiplier = 1.0f + ((maxMultiplier - 1.0f) * fadeRatio);
+                        desiredTargetLevel = dryRMS[ch] * evaporatingMultiplier;
+                    }
+                }
+
+                float rawTargetGain = desiredTargetLevel / (inputRMS[ch] + 0.00001f);
+
+                // VOX MODE
+                if (mode == 1 && ratio > 1) {
+                    float targetGainDb = 20.0f * std::log10(rawTargetGain);
+                    targetGainDb *= (float)ratio; 
+                    rawTargetGain = std::pow(10.0f, targetGainDb / 20.0f);
+                }
+
+                // PUNCH MODE
+                if (mode == 3) {
+                    float dryCrest = dryPeak[ch] / (dryRMS[ch] + 0.00001f);
+                    float inputCrest = inputPeak[ch] / (inputRMS[ch] + 0.00001f);
+                    float loudnessComp = 1.0f + (1.0f - juce::jmin(1.0f, dryPeak[ch]));
+                    float punchMultiplier = 0.09f * (float)ratio;
+
+                    if (dryCrest > inputCrest + 0.05f) {
+                        float restorationAmount = dryCrest / inputCrest;
+                        rawTargetGain *= (restorationAmount * loudnessComp * 0.8f); 
+                    }
+                    else if (std::abs(dryCrest - inputCrest) <= 0.05f && dryCrest > 2.0f) {
+                        float smartBoost = 1.0f + (punchMultiplier * dryCrest * loudnessComp);
+                        if (smartBoost > 3.0f) smartBoost = 3.0f; 
+                        rawTargetGain *= smartBoost;
+                    }
+                }
+
+                gainFactor[ch] = std::min(rawTargetGain, 32.0f);
                 
-                // If Ratio is 1, use 1/2. Otherwise use 1/3, 1/6, 1/9
-                float spaceExponent = (ratio == 1) ? 0.5f : (1.0f / (float)ratio);
-
-                if (dryRMS < thresholdX && dryRMS > thresholdY) {
-                    desiredTargetLevel = thresholdX * std::pow(dryRMS / thresholdX, spaceExponent);
-                } 
-                else if (dryRMS <= thresholdY && thresholdY > 0.00001f) {
-                    float maxMultiplier = std::pow(thresholdX / thresholdY, spaceExponent); 
-                    float fadeRatio = dryRMS / thresholdY; 
-                    float evaporatingMultiplier = 1.0f + ((maxMultiplier - 1.0f) * fadeRatio);
-                    desiredTargetLevel = dryRMS * evaporatingMultiplier;
+                // SPACE MODE SAFETY CAP: Prevent tails from blowing out the speakers
+                if (mode == 2) {
+                    gainFactor[ch] = std::min(gainFactor[ch], 8.0f); 
                 }
             }
-
-            float rawTargetGain = desiredTargetLevel / (inputRMS + 0.00001f);
-
-            // ==========================================================
-            // VOX MODE: EXAGGERATED RIDING
-            // ==========================================================
-            if (mode == 1 && ratio > 1) {
-                // Mathematically multiply the fader's travel distance in decibels
-                float targetGainDb = 20.0f * std::log10(rawTargetGain);
-                targetGainDb *= (float)ratio; 
-                rawTargetGain = std::pow(10.0f, targetGainDb / 20.0f);
-            }
-
-            // ==========================================================
-            // PUNCH MODE: EXAGGERATED IMPACT
-            // ==========================================================
-            if (mode == 3)
-            {
-                float dryCrest = dryPeak / (dryRMS + 0.00001f);
-                float inputCrest = inputPeak / (inputRMS + 0.00001f);
-                float loudnessComp = 1.0f + (1.0f - juce::jmin(1.0f, dryPeak));
-                
-                // Scale the 0.09f boost by our diagnostic ratio
-                float punchMultiplier = 0.09f * (float)ratio;
-
-                if (dryCrest > inputCrest + 0.05f) {
-                    float restorationAmount = dryCrest / inputCrest;
-                    rawTargetGain *= (restorationAmount * loudnessComp * 0.8f); 
-                }
-                else if (std::abs(dryCrest - inputCrest) <= 0.05f && dryCrest > 2.0f) {
-                    float smartBoost = 1.0f + (punchMultiplier * dryCrest * loudnessComp);
-                    if (smartBoost > 3.0f) smartBoost = 3.0f; 
-                    rawTargetGain *= smartBoost;
-                }
-            }
-
-            // Hysteresis is removed - direct mapping to desired target
-            gainFactor = rawTargetGain;
-            if (gainFactor > 32.0f) gainFactor = 32.0f; 
         }
     }
 
     // ==========================================================
-    // MODE ENGINE: BALLISTICS (SPEED)
+    // BALLISTICS SETTINGS
     // ==========================================================
     float attackTime = 0.05f; 
     float releaseTime = 0.10f; 
     
-    if (mode == 1) // VOX MODE
-    {
+    if (mode == 1) { 
         attackTime = 0.015f; 
         releaseTime = 0.030f; 
     }
-    else if (mode == 2) // SPACE MODE
-    {
-        attackTime = 0.050f; 
-        releaseTime = 0.250f; 
+    else if (mode == 2) { 
+        attackTime = 0.002f; // Lightning fast attack prevents transient slip-through
+        releaseTime = musicalRelease * 8.0f; // Tempo-synced rhythmic swell
     }
-    else if (mode == 3) // PUNCH MODE
-    {
-        attackTime = 0.001f; // Surgical 1ms Attack
-        releaseTime = musicalRelease; // Tempo-Synced 1/128 Triplet
+    else if (mode == 3) { 
+        attackTime = 0.001f; 
+        releaseTime = musicalRelease; 
     }
 
-    // Convert times into analog-style RC filter coefficients
     float sampleRateSafe = (currentSampleRate > 0.0) ? (float)currentSampleRate : 44100.0f;
     float attackCoeff = 1.0f - std::exp(-1.0f / (attackTime * sampleRateSafe));
     float releaseCoeff = 1.0f - std::exp(-1.0f / (releaseTime * sampleRateSafe));
 
-    if (gainFactor <= 0.00001f) currentGainDb.store(-100.0f);
-    else                        currentGainDb.store(20.0f * std::log10(gainFactor));
+    // Update Action Meter (using highest L/R gain factor)
+    float maxGainFactor = std::max(gainFactor[0], gainFactor[1]);
+    if (maxGainFactor <= 0.00001f) currentGainDb.store(-100.0f);
+    else                           currentGainDb.store(20.0f * std::log10(maxGainFactor));
 
     // ==========================================================
-    // MASTER OUTPUT LOOP: ANALOG GLIDE, PURPLE MODIFIERS & CLIPPER
+    // PER-CHANNEL SAMPLE PROCESSING
     // ==========================================================
-    bool isTransient = (mode == 3 && gainFactor > 1.05f); // Used for punch clipper
-
-    int shredMode = currentShredMode.load();
-
-    for (int sampleIndex = 0; sampleIndex < mainBuffer.getNumSamples(); ++sampleIndex)
+    for (int ch = 0; ch < numChannels; ++ch)
     {
-        // Smoothly glide the fader (Zero clicks, pure math)
-        if (gainFactor < currentFaderGain) {
-            currentFaderGain += attackCoeff * (gainFactor - currentFaderGain); // Ducking
-        } else {
-            currentFaderGain += releaseCoeff * (gainFactor - currentFaderGain); // Recovering
-        }
-        
-        for (int channel = 0; channel < mainBuffer.getNumChannels(); ++channel)
-        {
-            auto* channelData = mainBuffer.getWritePointer(channel);
-            float sampleVal = channelData[sampleIndex];
-            float appliedGain = currentFaderGain;
+        bool isTransient = (mode == 3 && gainFactor[ch] > 1.05f);
+        auto* channelData = mainBuffer.getWritePointer(ch);
 
-            // --- PURPLE MODIFIERS ---
+       for (int sampleIndex = 0; sampleIndex < mainBuffer.getNumSamples(); ++sampleIndex)
+        {
+            // Dual Mono Fader Glide: Attack = Moving away from 1.0, Release = Returning to 1.0
+            bool isAttacking = std::abs(gainFactor[ch] - 1.0f) > std::abs(currentFaderGain[ch] - 1.0f);
+            
+            if (isAttacking) {
+                currentFaderGain[ch] += attackCoeff * (gainFactor[ch] - currentFaderGain[ch]); 
+            } else {
+                currentFaderGain[ch] += releaseCoeff * (gainFactor[ch] - currentFaderGain[ch]); 
+            }
+            
+            float sampleVal = channelData[sampleIndex];
+            float appliedGain = currentFaderGain[ch];
+
+            // Purple Modifiers
             if (mod == 1) { 
-                appliedGain = 1.0f / std::max(currentFaderGain, 0.1f); 
+                appliedGain = 1.0f / std::max(currentFaderGain[ch], 0.1f); 
             } 
             else if (mod == 3) { 
-                if (dryRMS < (currentMacroPeak * 0.1f)) {
-                    appliedGain = 0.0f;
-                }
+                if (dryRMS[ch] < (currentMacroPeak[ch] * 0.1f)) appliedGain = 0.0f;
             }
 
-            // 1. Apply Gain
             sampleVal *= appliedGain;
 
             // 2. THE SHRED TRILOGY
             if (mod == 2) {
+                float rawSample = sampleVal; // Keep a copy of the dry signal for blending
+
                 if (shredMode == 1) { 
-                    // MODE I: THE LIVING WAVEFOLDER
-                    // Distortion scales dynamically with the Macro Peak.
-                    float drive = 1.0f + (currentMacroPeak * 20.0f);
-                    sampleVal = std::sin(sampleVal * drive * 5.0f) / std::sqrt(drive);
+                    // MODE I: THE SHADOW VERB (Living Wavefolder)
+                    // Massive dynamic drive, but scaled down so it doesn't explode the volume
+                    float drive = 5.0f + (currentMacroPeak[ch] * 25.0f); 
+                    float folded = std::sin(sampleVal * drive);
+                    
+                    // Blend 60% Wet / 40% Dry to keep the transient punch, and pad the volume
+                    sampleVal = (rawSample * 0.4f) + (folded * 0.6f);
                 } 
                 else if (shredMode == 2) { 
-                    // MODE II: THE TEMPO-CRUSH
-                    // 8-Bit decimation perfectly locked to a fraction of the DAW's 1/128th note.
+                    // MODE II: THE CRUSHED SYNTH (Tempo S&H)
                     int holdTarget = juce::jmax(1, (int)(musicalRelease * sampleRateSafe * 0.15f));
-                    if (holdCounter[channel] >= holdTarget) {
-                        heldSample[channel] = sampleVal;
-                        holdCounter[channel] = 0;
+                    if (holdCounter[ch] >= holdTarget) {
+                        heldSample[ch] = sampleVal;
+                        holdCounter[ch] = 0;
                     } else {
-                        sampleVal = heldSample[channel];
-                        holdCounter[channel]++;
+                        sampleVal = heldSample[ch];
+                        holdCounter[ch]++;
                     }
+                    // Square waves have huge RMS energy. We strictly cut this by 50% to volume-match.
+                    sampleVal *= 0.5f; 
                 } 
                 else if (shredMode == 3) { 
-                    // MODE III: THE BLACK HOLE
-                    // Massive 15x boost into a literal brick wall, volume-matched.
-                    sampleVal = std::clamp(sampleVal * 15.0f, -1.0f, 1.0f) * 0.15f;
+                    // MODE III: THE BLACK HOLE (Wall of Fuzz)
+                    // Colossal 50x overdrive guarantees everything gets crushed, safely padded down
+                    float fuzz = std::tanh(sampleVal * 50.0f);
+                    sampleVal = fuzz * 0.3f; 
                 }
             } else {
-                // Safety: Reset the Sample & Hold memory if SHRED is turned off
-                heldSample[channel] = sampleVal;
-                holdCounter[channel] = 0;
+                heldSample[ch] = sampleVal;
+                holdCounter[ch] = 0;
             }
 
-            // 3. Clipper
+            // Clipper
             if (isTransient) {
                 sampleVal = std::tanh(sampleVal * 1.05f); 
             } else {
@@ -309,7 +305,10 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         }
     }
 
-    mainBusLevel.store(mainBuffer.getRMSLevel(0, 0, mainBuffer.getNumSamples()));
+    // Measure Output Meter (Highest of L/R after processing)
+    float outRmsL = mainBuffer.getRMSLevel(0, 0, mainBuffer.getNumSamples());
+    float outRmsR = (numChannels > 1) ? mainBuffer.getRMSLevel(1, 0, mainBuffer.getNumSamples()) : outRmsL;
+    mainBusLevel.store(std::max(outRmsL, outRmsR));
 }
 
 //==============================================================================

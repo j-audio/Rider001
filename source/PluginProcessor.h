@@ -41,18 +41,19 @@ public:
 
 private:
     double currentSampleRate { 44100.0 }; 
-    float currentFaderGain { 1.0f }; // Our new continuous analog fader
+    
+    // ==========================================================
+    // TRUE DUAL MONO MEMORY ARRAYS (0 = Left, 1 = Right)
+    // ==========================================================
+    float currentFaderGain[2] { 1.0f, 1.0f }; 
+    float currentMacroPeak[2] { 0.0001f, 0.0001f };
+
+    float macroPeakRelease { 0.99f }; 
 
     // Audio level tracking for UI
     std::atomic<float> mainBusLevel { 0.0f };
     std::atomic<float> sidechainBusLevel { 0.0f };
     std::atomic<float> currentGainDb { 0.0f };
-
-    // ==========================================================
-    // SMART PEAK TRACKER MEMORY
-    // ==========================================================
-    float currentMacroPeak { 0.0001f };
-    float macroPeakRelease { 0.99f }; 
 
 public:
     float getMainBusLevel() const { return mainBusLevel.load(); }
@@ -68,7 +69,7 @@ public:
     
     // The SHRED Trilogy
     std::atomic<int> currentShredMode { 1 }; // 1=Wavefolder, 2=TempoCrush, 3=BlackHole
-    float heldSample[8] { 0.0f }; // Memory for the S&H algorithm (supports up to 8 channels safely)
+    float heldSample[8] { 0.0f }; // Memory for the S&H algorithm 
     int holdCounter[8] { 0 };     // Counter for the S&H algorithm
 
 private:

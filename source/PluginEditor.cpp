@@ -5,10 +5,8 @@ PluginEditor::PluginEditor (PluginProcessor& p)
     : AudioProcessorEditor (&p), processorRef (p)
 {
     addAndMakeVisible (inspectButton);
-
     inspectButton.onClick = [&] {
-        if (!inspector)
-        {
+        if (!inspector) {
             inspector = std::make_unique<melatonin::Inspector> (*this);
             inspector->onClose = [this]() { inspector.reset(); };
         }
@@ -55,35 +53,6 @@ PluginEditor::PluginEditor (PluginProcessor& p)
     shredButton.setLookAndFeel(&purpleLookAndFeel);
     chopButton.setLookAndFeel(&purpleLookAndFeel);
 
-    // ==========================================================
-    // SHRED TRILOGY SUB-MENU WIRING
-    // ==========================================================
-    shredMode1.setLookAndFeel(&miniPurpleLookAndFeel);
-    shredMode2.setLookAndFeel(&miniPurpleLookAndFeel);
-    shredMode3.setLookAndFeel(&miniPurpleLookAndFeel);
-
-    shredMode1.setToggleState(true, juce::dontSendNotification); // Default to Mode I
-
-    auto shredModeClick = [this](int m, juce::ToggleButton* btn) {
-        if (btn->getToggleState()) {
-            if (btn != &shredMode1) shredMode1.setToggleState(false, juce::dontSendNotification);
-            if (btn != &shredMode2) shredMode2.setToggleState(false, juce::dontSendNotification);
-            if (btn != &shredMode3) shredMode3.setToggleState(false, juce::dontSendNotification);
-            processorRef.currentShredMode.store(m);
-        } else {
-            // Prevent turning all of them off. One must always be active!
-            btn->setToggleState(true, juce::dontSendNotification);
-        }
-    };
-
-    shredMode1.onClick = [this, shredModeClick] { shredModeClick(1, &shredMode1); };
-    shredMode2.onClick = [this, shredModeClick] { shredModeClick(2, &shredMode2); };
-    shredMode3.onClick = [this, shredModeClick] { shredModeClick(3, &shredMode3); };
-
-    addAndMakeVisible(shredMode1);
-    addAndMakeVisible(shredMode2);
-    addAndMakeVisible(shredMode3);
-
     flipButton.onClick = [this] {
         if (flipButton.getToggleState()) {
             shredButton.setToggleState(false, juce::dontSendNotification);
@@ -111,33 +80,79 @@ PluginEditor::PluginEditor (PluginProcessor& p)
     addAndMakeVisible(chopButton);
 
     // ==========================================================
-    // BANK 3 WIRING: RATIO DIAGNOSTICS (RED)
+    // SHRED TRILOGY SUB-MENU WIRING
     // ==========================================================
-    ratio3Button.setLookAndFeel(&vintageLookAndFeel);
-    ratio6Button.setLookAndFeel(&vintageLookAndFeel);
-    ratio9Button.setLookAndFeel(&vintageLookAndFeel);
+    shredMode1.setLookAndFeel(&miniPurpleLookAndFeel);
+    shredMode2.setLookAndFeel(&miniPurpleLookAndFeel);
+    shredMode3.setLookAndFeel(&miniPurpleLookAndFeel);
+
+    shredMode1.setToggleState(true, juce::dontSendNotification);
+
+    auto shredModeClick = [this](int m, juce::ToggleButton* btn) {
+        if (btn->getToggleState()) {
+            if (btn != &shredMode1) shredMode1.setToggleState(false, juce::dontSendNotification);
+            if (btn != &shredMode2) shredMode2.setToggleState(false, juce::dontSendNotification);
+            if (btn != &shredMode3) shredMode3.setToggleState(false, juce::dontSendNotification);
+            processorRef.currentShredMode.store(m);
+        } else {
+            btn->setToggleState(true, juce::dontSendNotification);
+        }
+    };
+
+    shredMode1.onClick = [this, shredModeClick] { shredModeClick(1, &shredMode1); };
+    shredMode2.onClick = [this, shredModeClick] { shredModeClick(2, &shredMode2); };
+    shredMode3.onClick = [this, shredModeClick] { shredModeClick(3, &shredMode3); };
+
+    addAndMakeVisible(shredMode1);
+    addAndMakeVisible(shredMode2);
+    addAndMakeVisible(shredMode3);
+
+    // ==========================================================
+    // BANK 3 WIRING: 1176 RATIO PANEL (ORANGE/GREY)
+    // ==========================================================
+    ratio1Button.setLookAndFeel(&ratioLookAndFeel);
+    ratio3Button.setLookAndFeel(&ratioLookAndFeel);
+    ratio6Button.setLookAndFeel(&ratioLookAndFeel);
+    ratio9Button.setLookAndFeel(&ratioLookAndFeel);
+
+    ratio1Button.setToggleState(true, juce::dontSendNotification); // Default
 
     auto ratioClick = [this](int r, juce::ToggleButton* btn) {
         if (btn->getToggleState()) {
+            if (btn != &ratio1Button) ratio1Button.setToggleState(false, juce::dontSendNotification);
             if (btn != &ratio3Button) ratio3Button.setToggleState(false, juce::dontSendNotification);
             if (btn != &ratio6Button) ratio6Button.setToggleState(false, juce::dontSendNotification);
             if (btn != &ratio9Button) ratio9Button.setToggleState(false, juce::dontSendNotification);
             processorRef.currentRatio.store(r);
         } else {
-            processorRef.currentRatio.store(1); // Default 1:1 when all unclicked
+            ratio1Button.setToggleState(true, juce::dontSendNotification);
+            processorRef.currentRatio.store(1);
         }
     };
 
+    ratio1Button.onClick = [this, ratioClick] { ratioClick(1, &ratio1Button); };
     ratio3Button.onClick = [this, ratioClick] { ratioClick(3, &ratio3Button); };
     ratio6Button.onClick = [this, ratioClick] { ratioClick(6, &ratio6Button); };
     ratio9Button.onClick = [this, ratioClick] { ratioClick(9, &ratio9Button); };
 
+    addAndMakeVisible(ratio1Button);
     addAndMakeVisible(ratio3Button);
     addAndMakeVisible(ratio6Button);
     addAndMakeVisible(ratio9Button);
 
+    // ==========================================================
+    // BANK 4 WIRING: DENON CHUNKY SWITCHES
+    // ==========================================================
+    chunkyA.setLookAndFeel(&rockerLookAndFeel);
+    chunkyB.setLookAndFeel(&rockerLookAndFeel);
+    
+    // No DSP logic attached yet, just for visual layout!
+    addAndMakeVisible(chunkyA);
+    addAndMakeVisible(chunkyB);
+
     startTimerHz(30);
-    setSize (600, 220);
+    // Increased height to 250 to give the stacked UI strips more room
+    setSize (600, 250);
 }
 
 PluginEditor::~PluginEditor()
@@ -151,10 +166,18 @@ PluginEditor::~PluginEditor()
     flipButton.setLookAndFeel(nullptr);
     shredButton.setLookAndFeel(nullptr);
     chopButton.setLookAndFeel(nullptr);
+    
+    shredMode1.setLookAndFeel(nullptr);
+    shredMode2.setLookAndFeel(nullptr);
+    shredMode3.setLookAndFeel(nullptr);
 
+    ratio1Button.setLookAndFeel(nullptr);
     ratio3Button.setLookAndFeel(nullptr);
     ratio6Button.setLookAndFeel(nullptr);
     ratio9Button.setLookAndFeel(nullptr);
+    
+    chunkyA.setLookAndFeel(nullptr);
+    chunkyB.setLookAndFeel(nullptr);
 }
 
 void PluginEditor::paint (juce::Graphics& g)
@@ -236,45 +259,34 @@ void PluginEditor::paint (juce::Graphics& g)
     drawMeterRecess(actionMeter);
     drawMeterRecess(outputMeter);
 
+    // INCREASED STRIP HEIGHT to accommodate double-row UI
     int stripWidth = 180;
-    int stripHeight = 36;
-    int stripY = actionMeter.getBottom() + 15; 
+    int stripHeight = 85; 
+    int stripY = 150; 
 
-    // DRAW CONTROL STRIP 1 (CENTER)
-    int strip1X = actionMeter.getX() + (actionMeter.getWidth() - stripWidth) / 2;
-    juce::Rectangle<int> strip1Area(strip1X, stripY, stripWidth, stripHeight);
-    g.setColour(juce::Colour(0xff0a0a0a));
-    g.fillRect(strip1Area);
-    g.setColour(juce::Colour(0xff333333));
-    g.drawLine(strip1X, stripY, strip1X + stripWidth, stripY, 1.0f);
-    g.drawLine(strip1X, stripY, strip1X, stripY + stripHeight, 1.0f);
-    g.setColour(juce::Colour(0xff666666).withAlpha(0.5f));
-    g.drawLine(strip1X, stripY + stripHeight, strip1X + stripWidth, stripY + stripHeight, 1.0f);
-    g.drawLine(strip1X + stripWidth, stripY, strip1X + stripWidth, stripY + stripHeight, 1.0f);
+    auto drawStripBg = [&](int x) {
+        juce::Rectangle<int> area(x, stripY, stripWidth, stripHeight);
+        g.setColour(juce::Colour(0xff0a0a0a));
+        g.fillRect(area);
+        g.setColour(juce::Colour(0xff333333));
+        g.drawLine(x, stripY, x + stripWidth, stripY, 1.0f);
+        g.drawLine(x, stripY, x, stripY + stripHeight, 1.0f);
+        g.setColour(juce::Colour(0xff666666).withAlpha(0.5f));
+        g.drawLine(x, stripY + stripHeight, x + stripWidth, stripY + stripHeight, 1.0f);
+        g.drawLine(x + stripWidth, stripY, x + stripWidth, stripY + stripHeight, 1.0f);
+    };
 
-    // DRAW CONTROL STRIP 2 (RIGHT)
-    int strip2X = outputMeter.getX() + (outputMeter.getWidth() - stripWidth) / 2;
-    juce::Rectangle<int> strip2Area(strip2X, stripY, stripWidth, stripHeight);
-    g.setColour(juce::Colour(0xff0a0a0a));
-    g.fillRect(strip2Area);
-    g.setColour(juce::Colour(0xff333333));
-    g.drawLine(strip2X, stripY, strip2X + stripWidth, stripY, 1.0f);
-    g.drawLine(strip2X, stripY, strip2X, stripY + stripHeight, 1.0f);
-    g.setColour(juce::Colour(0xff666666).withAlpha(0.5f));
-    g.drawLine(strip2X, stripY + stripHeight, strip2X + stripWidth, stripY + stripHeight, 1.0f);
-    g.drawLine(strip2X + stripWidth, stripY, strip2X + stripWidth, stripY + stripHeight, 1.0f);
-
-    // DRAW CONTROL STRIP 3 (LEFT - RATIO)
+    // Strip 1: Left (Chunky Switches)
     int strip3X = analyzedMeter.getX() + (analyzedMeter.getWidth() - stripWidth) / 2;
-    juce::Rectangle<int> strip3Area(strip3X, stripY, stripWidth, stripHeight);
-    g.setColour(juce::Colour(0xff0a0a0a));
-    g.fillRect(strip3Area);
-    g.setColour(juce::Colour(0xff333333));
-    g.drawLine(strip3X, stripY, strip3X + stripWidth, stripY, 1.0f);
-    g.drawLine(strip3X, stripY, strip3X, stripY + stripHeight, 1.0f);
-    g.setColour(juce::Colour(0xff666666).withAlpha(0.5f));
-    g.drawLine(strip3X, stripY + stripHeight, strip3X + stripWidth, stripY + stripHeight, 1.0f);
-    g.drawLine(strip3X + stripWidth, stripY, strip3X + stripWidth, stripY + stripHeight, 1.0f);
+    drawStripBg(strip3X);
+
+    // Strip 2: Center (Engine & 1176 Ratio)
+    int strip1X = actionMeter.getX() + (actionMeter.getWidth() - stripWidth) / 2;
+    drawStripBg(strip1X);
+
+    // Strip 3: Right (Modifiers & Shred Mini-Menu)
+    int strip2X = outputMeter.getX() + (outputMeter.getWidth() - stripWidth) / 2;
+    drawStripBg(strip2X);
 
     // SCREEN-PRINT LABELS
     {
@@ -282,11 +294,10 @@ void PluginEditor::paint (juce::Graphics& g)
         g.setFont(labelFont);
         g.setColour(juce::Colour(0xffe6e6e6));
 
-        int labelY = analyzedMeter.getBottom() + 8;
+        int labelY = analyzedMeter.getBottom() + 6;
         int labelH = 20;
 
         g.drawText("ANALYZED", analyzedMeter.getX(), labelY, analyzedMeter.getWidth(), labelH, juce::Justification::centred);
-        // "OUTPUT" text completely removed to unblock the purple buttons!
 
         juce::GlyphArrangement textGlyphs;
         textGlyphs.addLineOfText(labelFont, "ANALYZED", 0.0f, 0.0f);
@@ -317,30 +328,48 @@ void PluginEditor::resized()
     outputMeter   = juce::Rectangle<int>(420, 30, 160, 110);
 
     int stripWidth = 180;
-    int stripHeight = 36;
-    int stripY = actionMeter.getBottom() + 15;
-    int buttonWidth = stripWidth / 3;
-
+    int stripY = 150; 
+    
+    // ==========================================================
+    // CENTER STRIP: Engine Buttons (Top) & 1176 Ratio Bank (Bottom)
+    // ==========================================================
     int strip1X = actionMeter.getX() + (actionMeter.getWidth() - stripWidth) / 2;
-    voxButton.setBounds(strip1X, stripY, buttonWidth, stripHeight);
-    spaceButton.setBounds(strip1X + buttonWidth, stripY, buttonWidth, stripHeight);
-    punchButton.setBounds(strip1X + (buttonWidth * 2), stripY, buttonWidth, stripHeight);
+    int engineBtnW = stripWidth / 3;
+    voxButton.setBounds(strip1X, stripY + 5, engineBtnW, 30);
+    spaceButton.setBounds(strip1X + engineBtnW, stripY + 5, engineBtnW, 30);
+    punchButton.setBounds(strip1X + (engineBtnW * 2), stripY + 5, engineBtnW, 30);
 
+    int ratioBtnW = stripWidth / 4;
+    int ratioY = stripY + 45; 
+    ratio1Button.setBounds(strip1X, ratioY, ratioBtnW, 30);
+    ratio3Button.setBounds(strip1X + ratioBtnW, ratioY, ratioBtnW, 30);
+    ratio6Button.setBounds(strip1X + (ratioBtnW * 2), ratioY, ratioBtnW, 30);
+    ratio9Button.setBounds(strip1X + (ratioBtnW * 3), ratioY, ratioBtnW, 30);
+
+    // ==========================================================
+    // RIGHT STRIP: Modifiers (Top) & Shred Sub-Menu (Bottom)
+    // ==========================================================
     int strip2X = outputMeter.getX() + (outputMeter.getWidth() - stripWidth) / 2;
-    flipButton.setBounds(strip2X, stripY, buttonWidth, stripHeight);
-    shredButton.setBounds(strip2X + buttonWidth, stripY, buttonWidth, stripHeight);
-    chopButton.setBounds(strip2X + (buttonWidth * 2), stripY, buttonWidth, stripHeight);
-    // Place the Shred Sub-Menu directly under the SHRED button
-    int miniStripY = stripY + stripHeight + 4;
-    int miniBtnW = buttonWidth / 3;
-    shredMode1.setBounds(strip2X + buttonWidth, miniStripY, miniBtnW, 16);
-    shredMode2.setBounds(strip2X + buttonWidth + miniBtnW, miniStripY, miniBtnW, 16);
-    shredMode3.setBounds(strip2X + buttonWidth + (miniBtnW * 2), miniStripY, miniBtnW, 16);
+    int modBtnW = stripWidth / 3;
+    flipButton.setBounds(strip2X, stripY + 5, modBtnW, 30);
+    shredButton.setBounds(strip2X + modBtnW, stripY + 5, modBtnW, 30);
+    chopButton.setBounds(strip2X + (modBtnW * 2), stripY + 5, modBtnW, 30);
 
+    int miniStripY = stripY + 39;
+    int miniBtnW = modBtnW / 3;
+    shredMode1.setBounds(strip2X + modBtnW, miniStripY, miniBtnW, 16);
+    shredMode2.setBounds(strip2X + modBtnW + miniBtnW, miniStripY, miniBtnW, 16);
+    shredMode3.setBounds(strip2X + modBtnW + (miniBtnW * 2), miniStripY, miniBtnW, 16);
+
+    // ==========================================================
+    // LEFT STRIP: Denon Chunky Rocker Switches
+    // ==========================================================
     int strip3X = analyzedMeter.getX() + (analyzedMeter.getWidth() - stripWidth) / 2;
-    ratio3Button.setBounds(strip3X, stripY, buttonWidth, stripHeight);
-    ratio6Button.setBounds(strip3X + buttonWidth, stripY, buttonWidth, stripHeight);
-    ratio9Button.setBounds(strip3X + (buttonWidth * 2), stripY, buttonWidth, stripHeight);
+    int switchW = 28;
+    int switchH = 50;
+    int switchY = stripY + 25; 
+    chunkyA.setBounds(strip3X + 40, switchY, switchW, switchH);
+    chunkyB.setBounds(strip3X + 110, switchY, switchW, switchH);
 
     inspectButton.setBounds(getWidth() - 110, getHeight() - 35, 100, 25);
 }
