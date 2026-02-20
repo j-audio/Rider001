@@ -82,7 +82,7 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     float dryPeak = 0.0f;
 
     // Safely measure sidechain ONLY if DAW provides it
-    if (getBusCount(true) > 1 && !getBus(true, 1)->isDisabled()) 
+    if (getBusCount(true) > 1 && getBus(true, 1)->isEnabled()) 
     {
         auto sidechainBuffer = getBusBuffer(buffer, true, 1);
         dryRMS = sidechainBuffer.getRMSLevel(0, 0, sidechainBuffer.getNumSamples());
@@ -97,8 +97,8 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     // TEMPO SYNC ENGINE (For PUNCH Mode Release)
     // ==========================================================
     double currentBPM = 120.0;
-    if (auto* playHead = getPlayHead()) {
-        if (auto positionInfo = playHead->getPosition()) {
+    if (auto* activePlayHead = getPlayHead()) {
+        if (auto positionInfo = activePlayHead->getPosition()) {
             if (positionInfo->getBpm().hasValue()) {
                 currentBPM = *positionInfo->getBpm();
                 if (currentBPM <= 0.0) currentBPM = 120.0; // Safety check
