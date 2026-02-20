@@ -40,8 +40,8 @@ public:
     void setStateInformation (const void* data, int sizeInBytes) override;
 
 private:
-    juce::LinearSmoothedValue<float> smoothedGain;
     double currentSampleRate { 44100.0 }; 
+    float currentFaderGain { 1.0f }; // Our new continuous analog fader
 
     // Audio level tracking for UI
     std::atomic<float> mainBusLevel { 0.0f };
@@ -65,6 +65,11 @@ public:
     std::atomic<int> currentMode { 0 };     // 0=Base, 1=VOX, 2=SPACE, 3=PUNCH
     std::atomic<int> currentModifier { 0 }; // 0=Clean, 1=FLIP, 2=SHRED, 3=CHOP
     std::atomic<int> currentRatio { 1 };
+    
+    // The SHRED Trilogy
+    std::atomic<int> currentShredMode { 1 }; // 1=Wavefolder, 2=TempoCrush, 3=BlackHole
+    float heldSample[8] { 0.0f }; // Memory for the S&H algorithm (supports up to 8 channels safely)
+    int holdCounter[8] { 0 };     // Counter for the S&H algorithm
 
 private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginProcessor)

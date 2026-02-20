@@ -34,8 +34,7 @@ void PluginProcessor::changeProgramName (int index, const juce::String& newName)
 void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     currentSampleRate = sampleRate;
-    smoothedGain.reset(currentSampleRate, 0.05);
-    smoothedGain.setCurrentAndTargetValue(1.0f);
+    currentFaderGain = 1.0f; // Reset our analog fader on playback start
 
     double blocksPerSecond = sampleRate / static_cast<double>(samplesPerBlock);
     macroPeakRelease = static_cast<float>(std::exp(-1.0 / (2.0 * blocksPerSecond)));
@@ -197,18 +196,8 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                 }
             }
 
-            // ==========================================================
-            // HYSTERESIS DEADBAND
-            // ==========================================================
-            float currentTarget = smoothedGain.getTargetValue();
-            float difference = std::abs(rawTargetGain - currentTarget);
-            
-            if (difference < 0.06f && (mode == 1 || mode == 2)) { 
-                gainFactor = currentTarget; 
-            } else {
-                gainFactor = rawTargetGain; 
-            }
-
+            // Hysteresis is removed - direct mapping to desired target
+            gainFactor = rawTargetGain;
             if (gainFactor > 32.0f) gainFactor = 32.0f; 
         }
     }
@@ -216,55 +205,58 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     // ==========================================================
     // MODE ENGINE: BALLISTICS (SPEED)
     // ==========================================================
-    bool isAttack = (gainFactor < smoothedGain.getCurrentValue());
-    float smoothingTime = 0.05f; 
+    float attackTime = 0.05f; 
+    float releaseTime = 0.10f; 
     
     if (mode == 1) // VOX MODE
     {
-        if (isAttack) smoothingTime = 0.015f; 
-        else          smoothingTime = 0.030f; 
+        attackTime = 0.015f; 
+        releaseTime = 0.030f; 
     }
     else if (mode == 2) // SPACE MODE
     {
-        if (isAttack) smoothingTime = 0.050f; 
-        else          smoothingTime = 0.250f; 
+        attackTime = 0.050f; 
+        releaseTime = 0.250f; 
     }
     else if (mode == 3) // PUNCH MODE
     {
-        if (isAttack) smoothingTime = 0.001f; // Surgical 1ms Attack
-        else          smoothingTime = musicalRelease; // Tempo-Synced 1/128 Triplet
-    }
-    else // BASE MODE
-    {
-        if (isAttack) smoothingTime = 0.050f; 
-        else          smoothingTime = 0.100f; 
+        attackTime = 0.001f; // Surgical 1ms Attack
+        releaseTime = musicalRelease; // Tempo-Synced 1/128 Triplet
     }
 
-    smoothedGain.reset(currentSampleRate, smoothingTime);
+    // Convert times into analog-style RC filter coefficients
+    float sampleRateSafe = (currentSampleRate > 0.0) ? (float)currentSampleRate : 44100.0f;
+    float attackCoeff = 1.0f - std::exp(-1.0f / (attackTime * sampleRateSafe));
+    float releaseCoeff = 1.0f - std::exp(-1.0f / (releaseTime * sampleRateSafe));
 
     if (gainFactor <= 0.00001f) currentGainDb.store(-100.0f);
     else                        currentGainDb.store(20.0f * std::log10(gainFactor));
 
-    smoothedGain.setTargetValue(gainFactor);
-
     // ==========================================================
-    // MASTER OUTPUT LOOP: GAIN, PURPLE MODIFIERS & CLIPPER
+    // MASTER OUTPUT LOOP: ANALOG GLIDE, PURPLE MODIFIERS & CLIPPER
     // ==========================================================
     bool isTransient = (mode == 3 && gainFactor > 1.05f); // Used for punch clipper
 
+    int shredMode = currentShredMode.load();
+
     for (int sampleIndex = 0; sampleIndex < mainBuffer.getNumSamples(); ++sampleIndex)
     {
-        float currentGain = smoothedGain.getNextValue();
+        // Smoothly glide the fader (Zero clicks, pure math)
+        if (gainFactor < currentFaderGain) {
+            currentFaderGain += attackCoeff * (gainFactor - currentFaderGain); // Ducking
+        } else {
+            currentFaderGain += releaseCoeff * (gainFactor - currentFaderGain); // Recovering
+        }
         
         for (int channel = 0; channel < mainBuffer.getNumChannels(); ++channel)
         {
             auto* channelData = mainBuffer.getWritePointer(channel);
             float sampleVal = channelData[sampleIndex];
-            float appliedGain = currentGain;
+            float appliedGain = currentFaderGain;
 
             // --- PURPLE MODIFIERS ---
             if (mod == 1) { 
-                appliedGain = 1.0f / std::max(currentGain, 0.1f); 
+                appliedGain = 1.0f / std::max(currentFaderGain, 0.1f); 
             } 
             else if (mod == 3) { 
                 if (dryRMS < (currentMacroPeak * 0.1f)) {
@@ -275,9 +267,35 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
             // 1. Apply Gain
             sampleVal *= appliedGain;
 
-            // 2. SHRED Mod
+            // 2. THE SHRED TRILOGY
             if (mod == 2) {
-                sampleVal = std::sin(sampleVal * 5.0f); 
+                if (shredMode == 1) { 
+                    // MODE I: THE LIVING WAVEFOLDER
+                    // Distortion scales dynamically with the Macro Peak.
+                    float drive = 1.0f + (currentMacroPeak * 20.0f);
+                    sampleVal = std::sin(sampleVal * drive * 5.0f) / std::sqrt(drive);
+                } 
+                else if (shredMode == 2) { 
+                    // MODE II: THE TEMPO-CRUSH
+                    // 8-Bit decimation perfectly locked to a fraction of the DAW's 1/128th note.
+                    int holdTarget = juce::jmax(1, (int)(musicalRelease * sampleRateSafe * 0.15f));
+                    if (holdCounter[channel] >= holdTarget) {
+                        heldSample[channel] = sampleVal;
+                        holdCounter[channel] = 0;
+                    } else {
+                        sampleVal = heldSample[channel];
+                        holdCounter[channel]++;
+                    }
+                } 
+                else if (shredMode == 3) { 
+                    // MODE III: THE BLACK HOLE
+                    // Massive 15x boost into a literal brick wall, volume-matched.
+                    sampleVal = std::clamp(sampleVal * 15.0f, -1.0f, 1.0f) * 0.15f;
+                }
+            } else {
+                // Safety: Reset the Sample & Hold memory if SHRED is turned off
+                heldSample[channel] = sampleVal;
+                holdCounter[channel] = 0;
             }
 
             // 3. Clipper

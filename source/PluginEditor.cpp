@@ -55,6 +55,35 @@ PluginEditor::PluginEditor (PluginProcessor& p)
     shredButton.setLookAndFeel(&purpleLookAndFeel);
     chopButton.setLookAndFeel(&purpleLookAndFeel);
 
+    // ==========================================================
+    // SHRED TRILOGY SUB-MENU WIRING
+    // ==========================================================
+    shredMode1.setLookAndFeel(&miniPurpleLookAndFeel);
+    shredMode2.setLookAndFeel(&miniPurpleLookAndFeel);
+    shredMode3.setLookAndFeel(&miniPurpleLookAndFeel);
+
+    shredMode1.setToggleState(true, juce::dontSendNotification); // Default to Mode I
+
+    auto shredModeClick = [this](int m, juce::ToggleButton* btn) {
+        if (btn->getToggleState()) {
+            if (btn != &shredMode1) shredMode1.setToggleState(false, juce::dontSendNotification);
+            if (btn != &shredMode2) shredMode2.setToggleState(false, juce::dontSendNotification);
+            if (btn != &shredMode3) shredMode3.setToggleState(false, juce::dontSendNotification);
+            processorRef.currentShredMode.store(m);
+        } else {
+            // Prevent turning all of them off. One must always be active!
+            btn->setToggleState(true, juce::dontSendNotification);
+        }
+    };
+
+    shredMode1.onClick = [this, shredModeClick] { shredModeClick(1, &shredMode1); };
+    shredMode2.onClick = [this, shredModeClick] { shredModeClick(2, &shredMode2); };
+    shredMode3.onClick = [this, shredModeClick] { shredModeClick(3, &shredMode3); };
+
+    addAndMakeVisible(shredMode1);
+    addAndMakeVisible(shredMode2);
+    addAndMakeVisible(shredMode3);
+
     flipButton.onClick = [this] {
         if (flipButton.getToggleState()) {
             shredButton.setToggleState(false, juce::dontSendNotification);
@@ -301,6 +330,12 @@ void PluginEditor::resized()
     flipButton.setBounds(strip2X, stripY, buttonWidth, stripHeight);
     shredButton.setBounds(strip2X + buttonWidth, stripY, buttonWidth, stripHeight);
     chopButton.setBounds(strip2X + (buttonWidth * 2), stripY, buttonWidth, stripHeight);
+    // Place the Shred Sub-Menu directly under the SHRED button
+    int miniStripY = stripY + stripHeight + 4;
+    int miniBtnW = buttonWidth / 3;
+    shredMode1.setBounds(strip2X + buttonWidth, miniStripY, miniBtnW, 16);
+    shredMode2.setBounds(strip2X + buttonWidth + miniBtnW, miniStripY, miniBtnW, 16);
+    shredMode3.setBounds(strip2X + buttonWidth + (miniBtnW * 2), miniStripY, miniBtnW, 16);
 
     int strip3X = analyzedMeter.getX() + (analyzedMeter.getWidth() - stripWidth) / 2;
     ratio3Button.setBounds(strip3X, stripY, buttonWidth, stripHeight);

@@ -75,9 +75,34 @@ private:
             }
         }
     };
-
+    
     VintageButtonLookAndFeel vintageLookAndFeel;
     VintagePurpleButtonLookAndFeel purpleLookAndFeel;
+
+    // ==========================================================
+    // MINI VINTAGE DESIGN (For the Shred Sub-Menu)
+    // ==========================================================
+    class MiniVintagePurpleButtonLookAndFeel : public juce::LookAndFeel_V4 {
+    public:
+        void drawToggleButton(juce::Graphics& g, juce::ToggleButton& button,
+                              bool, bool) override {
+            auto bounds = button.getLocalBounds().toFloat();
+            g.setColour(button.getToggleState() ? juce::Colours::white : juce::Colour(0xff888888));
+            g.setFont(juce::FontOptions(10.0f).withStyle("Bold"));
+            g.drawText(button.getName(), bounds, juce::Justification::centred);
+            
+            if (button.getToggleState()) {
+                g.setColour(juce::Colour(0xffb026ff));
+                g.fillRect(bounds.getWidth()/2.0f - 4.0f, bounds.getHeight() - 2.0f, 8.0f, 2.0f);
+            }
+        }
+    };
+    MiniVintagePurpleButtonLookAndFeel miniPurpleLookAndFeel;
+
+    // The Shred Sub-Menu Buttons
+    juce::ToggleButton shredMode1 { "I" };
+    juce::ToggleButton shredMode2 { "II" };
+    juce::ToggleButton shredMode3 { "III" };
 
     // Bank 1: The Engine (Red LEDs)
     juce::ToggleButton voxButton   { "VOX" };
