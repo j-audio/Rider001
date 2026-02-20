@@ -235,10 +235,18 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 
        for (int sampleIndex = 0; sampleIndex < mainBuffer.getNumSamples(); ++sampleIndex)
         {
-            // Dual Mono Fader Glide: Attack = Moving away from 1.0, Release = Returning to 1.0
-            bool isAttacking = std::abs(gainFactor[ch] - 1.0f) > std::abs(currentFaderGain[ch] - 1.0f);
+            // Dual Mono Fader Glide: Smart Directional Ballistics
+            bool useFastTime = false;
             
-            if (isAttacking) {
+            if (mode == 3) {
+                // PUNCH MODE: Fast when fader goes UP (Spiking the transient)
+                useFastTime = (gainFactor[ch] > currentFaderGain[ch]);
+            } else {
+                // VOX, SPACE, BASE: Fast when fader goes DOWN (Protecting from peaks)
+                useFastTime = (gainFactor[ch] < currentFaderGain[ch]);
+            }
+            
+            if (useFastTime) {
                 currentFaderGain[ch] += attackCoeff * (gainFactor[ch] - currentFaderGain[ch]); 
             } else {
                 currentFaderGain[ch] += releaseCoeff * (gainFactor[ch] - currentFaderGain[ch]); 
@@ -263,16 +271,16 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 
                 if (shredMode == 1) { 
                     // MODE I: THE SHADOW VERB (Living Wavefolder)
-                    // Massive dynamic drive, but scaled down so it doesn't explode the volume
                     float drive = 5.0f + (currentMacroPeak[ch] * 25.0f); 
                     float folded = std::sin(sampleVal * drive);
                     
-                    // Blend 60% Wet / 40% Dry to keep the transient punch, and pad the volume
-                    sampleVal = (rawSample * 0.4f) + (folded * 0.6f);
+                    // Radically reduced the Wet mix to completely eliminate the volume explosion
+                    sampleVal = (rawSample * 0.5f) + (folded * 0.25f);
                 } 
                 else if (shredMode == 2) { 
                     // MODE II: THE CRUSHED SYNTH (Tempo S&H)
-                    int holdTarget = juce::jmax(1, (int)(musicalRelease * sampleRateSafe * 0.15f));
+                    // Increased multiplier to 0.45f to create musical "blocks" instead of sandy glitching
+                    int holdTarget = juce::jmax(1, (int)(musicalRelease * sampleRateSafe * 0.45f));
                     if (holdCounter[ch] >= holdTarget) {
                         heldSample[ch] = sampleVal;
                         holdCounter[ch] = 0;
@@ -280,12 +288,11 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                         sampleVal = heldSample[ch];
                         holdCounter[ch]++;
                     }
-                    // Square waves have huge RMS energy. We strictly cut this by 50% to volume-match.
-                    sampleVal *= 0.5f; 
+                    // Blend 40% Dry signal back in to preserve the musical tone of guitars/synths
+                    sampleVal = (rawSample * 0.4f) + (sampleVal * 0.6f * 0.5f); 
                 } 
                 else if (shredMode == 3) { 
                     // MODE III: THE BLACK HOLE (Wall of Fuzz)
-                    // Colossal 50x overdrive guarantees everything gets crushed, safely padded down
                     float fuzz = std::tanh(sampleVal * 50.0f);
                     sampleVal = fuzz * 0.3f; 
                 }
