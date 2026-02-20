@@ -144,10 +144,15 @@ private:
             g.setColour(juce::Colours::black.withAlpha(0.6f));
             g.drawLine(switchRect.getX(), switchRect.getCentreY(), switchRect.getRight(), switchRect.getCentreY(), 2.0f);
 
-            // Draw label above switch
+          // Draw label above switch
             g.setColour(juce::Colour(0xffaaaaaa));
             g.setFont(juce::FontOptions(10.0f).withStyle("Bold"));
-            g.drawText(button.getName(), bounds.getX(), bounds.getY() - 14.0f, bounds.getWidth(), 14.0f, juce::Justification::centred);
+            g.drawText(button.getName(), 
+                       static_cast<int>(bounds.getX()), 
+                       static_cast<int>(bounds.getY() - 14.0f), 
+                       static_cast<int>(bounds.getWidth()), 
+                       14, 
+                       juce::Justification::centred);
         }
     };
 

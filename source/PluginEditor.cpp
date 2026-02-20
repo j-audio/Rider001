@@ -175,7 +175,7 @@ PluginEditor::PluginEditor (PluginProcessor& p)
             processorRef.isGhostRecording.store(true);
             
             // Update dropdown to indicate unsaved status
-            ghostSelector.setItemText(ghostSelector.getSelectedId(), "* UNSAVED GHOST *");
+            ghostSelector.changeItemText(ghostSelector.getSelectedId(), "* UNSAVED GHOST *");
         } else {
             processorRef.isGhostRecording.store(false);
         }
@@ -183,9 +183,8 @@ PluginEditor::PluginEditor (PluginProcessor& p)
     
     saveGhostButton.onClick = [this] {
         juce::String savedName = "Ghost Track " + juce::String(ghostSelector.getSelectedId());
-        ghostSelector.setItemText(ghostSelector.getSelectedId(), savedName);
+        ghostSelector.changeItemText(ghostSelector.getSelectedId(), savedName);
     };
-
     addAndMakeVisible(chunkyA);
     addAndMakeVisible(chunkyB);
     addAndMakeVisible(ghostSelector);
