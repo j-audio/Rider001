@@ -185,6 +185,35 @@ PluginEditor::PluginEditor (PluginProcessor& p)
     addAndMakeVisible(ghostSelector);
     addAndMakeVisible(saveGhostButton);
 
+    // ==========================================================
+    // SOURCE SELECTOR WIRING (IN / EXT)
+    // ==========================================================
+    sourceInButton.setLookAndFeel(&sourceButtonLookAndFeel);
+    sourceExtButton.setLookAndFeel(&sourceButtonLookAndFeel);
+    
+    sourceInButton.setToggleState(true, juce::dontSendNotification); // Default to internal
+    
+    sourceInButton.onClick = [this] {
+        if (sourceInButton.getToggleState()) {
+            sourceExtButton.setToggleState(false, juce::dontSendNotification);
+            processorRef.forceExternalSidechain.store(false);
+        } else {
+            sourceInButton.setToggleState(true, juce::dontSendNotification); // Prevent turning both off
+        }
+    };
+    
+    sourceExtButton.onClick = [this] {
+        if (sourceExtButton.getToggleState()) {
+            sourceInButton.setToggleState(false, juce::dontSendNotification);
+            processorRef.forceExternalSidechain.store(true);
+        } else {
+            sourceExtButton.setToggleState(true, juce::dontSendNotification); // Prevent turning both off
+        }
+    };
+    
+    addAndMakeVisible(sourceInButton);
+    addAndMakeVisible(sourceExtButton);
+
     startTimerHz(30);
     // Increased height to accommodate the slider
     setSize (600, 260);
@@ -193,22 +222,38 @@ PluginEditor::PluginEditor (PluginProcessor& p)
 PluginEditor::~PluginEditor()
 {
     stopTimer();
+    
+    // Engine
     voxButton.setLookAndFeel(nullptr);
     spaceButton.setLookAndFeel(nullptr);
     punchButton.setLookAndFeel(nullptr);
+    
+    // Modifiers
     flipButton.setLookAndFeel(nullptr);
     shredButton.setLookAndFeel(nullptr);
     chopButton.setLookAndFeel(nullptr);
+    
+    // Shred Menu
     shredMode1.setLookAndFeel(nullptr);
     shredMode2.setLookAndFeel(nullptr);
     shredMode3.setLookAndFeel(nullptr);
+    
+    // Chop Knob
     chopSlider.setLookAndFeel(nullptr);
+
+    // Ratio Bank
     ratio1Button.setLookAndFeel(nullptr);
     ratio3Button.setLookAndFeel(nullptr);
     ratio6Button.setLookAndFeel(nullptr);
     ratio9Button.setLookAndFeel(nullptr);
+    
+    // Ghost Switches
     chunkyA.setLookAndFeel(nullptr);
     chunkyB.setLookAndFeel(nullptr);
+    
+    // IN / EXT Source Selectors (THIS IS THE NEW STEP!)
+    sourceInButton.setLookAndFeel(nullptr);
+    sourceExtButton.setLookAndFeel(nullptr);
 }
 
 void PluginEditor::paint (juce::Graphics& g)
@@ -400,6 +445,14 @@ void PluginEditor::resized()
     saveGhostButton.setBounds(strip3X + 125, menuY, 45, 18);
 
     inspectButton.setBounds(getWidth() - 110, getHeight() - 35, 100, 25);
+    // Position the IN / EXT source buttons under the Analyzed Meter
+    int sourceW = 35;
+    int sourceH = 16;
+    int sourceY = analyzedMeter.getBottom() + 32; 
+    int sourceCenterX = analyzedMeter.getX() + (analyzedMeter.getWidth() / 2);
+    
+    sourceInButton.setBounds(sourceCenterX - sourceW - 2, sourceY, sourceW, sourceH);
+    sourceExtButton.setBounds(sourceCenterX + 2, sourceY, sourceW, sourceH);
 }
 
 void PluginEditor::timerCallback()

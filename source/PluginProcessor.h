@@ -88,6 +88,7 @@ public:
     // We log the volume every 0.25 PPQ (16th note resolution).
     std::vector<float> ghostMapL; 
     std::vector<float> ghostMapR;
+    std::atomic<bool> forceExternalSidechain { false }; // False = IN, True = EXT
     
     // UI Feedback States
     std::atomic<int> ghostLedState { 0 }; // 0=Off, 1=Blinking Red, 2=Blinking Green, 3=Solid Green

@@ -201,12 +201,35 @@ private:
         }
     };
 
+    // ==========================================================
+    // SOURCE SELECTOR BUTTONS (IN / EXT)
+    // ==========================================================
+    class SourceButtonLookAndFeel : public juce::LookAndFeel_V4 {
+    public:
+        void drawToggleButton(juce::Graphics& g, juce::ToggleButton& button,
+                              bool, bool) override {
+            auto bounds = button.getLocalBounds().toFloat();
+            
+            // Draw background
+            g.setColour(button.getToggleState() ? juce::Colour(0xff555555) : juce::Colour(0xff1a1a1a));
+            g.fillRoundedRectangle(bounds, 3.0f);
+            g.setColour(juce::Colour(0xff333333));
+            g.drawRoundedRectangle(bounds, 3.0f, 1.0f);
+
+            // Draw text
+            g.setColour(button.getToggleState() ? juce::Colours::white : juce::Colour(0xff888888));
+            g.setFont(juce::FontOptions(10.0f).withStyle("Bold"));
+            g.drawText(button.getName(), bounds, juce::Justification::centred);
+        }
+    };
+
     VintageButtonLookAndFeel vintageLookAndFeel;
     VintagePurpleButtonLookAndFeel purpleLookAndFeel;
     Vintage1176RatioButtonLookAndFeel ratioLookAndFeel;
     ChunkyRockerSwitchLookAndFeel rockerLookAndFeel;
     MiniVintagePurpleButtonLookAndFeel miniPurpleLookAndFeel;
     ChopKnobLookAndFeel chopKnobLookAndFeel;
+    SourceButtonLookAndFeel sourceButtonLookAndFeel;
 
     juce::ToggleButton voxButton   { "VOX" };
     juce::ToggleButton spaceButton { "SPACE" };
@@ -231,6 +254,9 @@ private:
     juce::ToggleButton chunkyB { "B" }; 
     juce::ComboBox ghostSelector;       
     juce::TextButton saveGhostButton { "SAVE" }; 
+
+    juce::ToggleButton sourceInButton  { "IN" };
+    juce::ToggleButton sourceExtButton { "EXT" };
 
     juce::Rectangle<int> analyzedMeter;
     juce::Rectangle<int> actionMeter;
