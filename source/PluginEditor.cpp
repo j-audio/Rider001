@@ -14,7 +14,7 @@ PluginEditor::PluginEditor (PluginProcessor& p)
     };
 
     // ==========================================================
-    // BANK 1 WIRING: THE ENGINE (RED)
+    // BANK 1 WIRING: THE ENGINE (RED) (These remain exclusive)
     // ==========================================================
     voxButton.setLookAndFeel(&vintageLookAndFeel);
     spaceButton.setLookAndFeel(&vintageLookAndFeel);
@@ -47,32 +47,20 @@ PluginEditor::PluginEditor (PluginProcessor& p)
     addAndMakeVisible(punchButton);
 
     // ==========================================================
-    // BANK 2 WIRING: THE MODIFIERS (PURPLE)
+    // BANK 2 WIRING: THE MODIFIERS (PURPLE) (NOW INDEPENDENT!)
     // ==========================================================
     flipButton.setLookAndFeel(&purpleLookAndFeel);
     shredButton.setLookAndFeel(&purpleLookAndFeel);
     chopButton.setLookAndFeel(&purpleLookAndFeel);
 
     flipButton.onClick = [this] {
-        if (flipButton.getToggleState()) {
-            shredButton.setToggleState(false, juce::dontSendNotification);
-            chopButton.setToggleState(false, juce::dontSendNotification);
-            processorRef.currentModifier.store(1);
-        } else { processorRef.currentModifier.store(0); }
+        processorRef.isFlipActive.store(flipButton.getToggleState());
     };
     shredButton.onClick = [this] {
-        if (shredButton.getToggleState()) {
-            flipButton.setToggleState(false, juce::dontSendNotification);
-            chopButton.setToggleState(false, juce::dontSendNotification);
-            processorRef.currentModifier.store(2);
-        } else { processorRef.currentModifier.store(0); }
+        processorRef.isShredActive.store(shredButton.getToggleState());
     };
     chopButton.onClick = [this] {
-        if (chopButton.getToggleState()) {
-            flipButton.setToggleState(false, juce::dontSendNotification);
-            shredButton.setToggleState(false, juce::dontSendNotification);
-            processorRef.currentModifier.store(3);
-        } else { processorRef.currentModifier.store(0); }
+        processorRef.isChopActive.store(chopButton.getToggleState());
     };
 
     addAndMakeVisible(flipButton);
@@ -106,6 +94,19 @@ PluginEditor::PluginEditor (PluginProcessor& p)
     addAndMakeVisible(shredMode1);
     addAndMakeVisible(shredMode2);
     addAndMakeVisible(shredMode3);
+    
+    // ==========================================================
+    // CHOP THRESHOLD KNOB
+    // ==========================================================
+    chopSlider.setLookAndFeel(&chopKnobLookAndFeel);
+    chopSlider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+    chopSlider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+    chopSlider.setRange(0.01, 0.80, 0.01); 
+    chopSlider.setValue(0.10); // Default to our old hardcoded 10%
+    chopSlider.onValueChange = [this] {
+        processorRef.chopThreshold.store(static_cast<float>(chopSlider.getValue()));
+    };
+    addAndMakeVisible(chopSlider);
 
     // ==========================================================
     // BANK 3 WIRING: 1176 RATIO PANEL (ORANGE/GREY)
@@ -146,17 +147,14 @@ PluginEditor::PluginEditor (PluginProcessor& p)
     chunkyA.setLookAndFeel(&rockerLookAndFeel);
     chunkyB.setLookAndFeel(&rockerLookAndFeel);
     
-    // Setup Dropdown (ComboBox)
     ghostSelector.addItem("Slot 1: Unused", 1);
     ghostSelector.addItem("Slot 2: Unused", 2);
     ghostSelector.addItem("Slot 3: Unused", 3);
     ghostSelector.setSelectedId(1, juce::dontSendNotification);
     
-    // Save Button
     saveGhostButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff333333));
     saveGhostButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
     
-    // Switch A: Read Mode (Requires valid Ghost Data to activate)
     chunkyA.onClick = [this] {
         if (chunkyA.getToggleState()) {
             chunkyB.setToggleState(false, juce::dontSendNotification);
@@ -167,14 +165,11 @@ PluginEditor::PluginEditor (PluginProcessor& p)
         }
     };
 
-    // Switch B: Write Mode
     chunkyB.onClick = [this] {
         if (chunkyB.getToggleState()) {
             chunkyA.setToggleState(false, juce::dontSendNotification);
             processorRef.isGhostReading.store(false);
             processorRef.isGhostRecording.store(true);
-            
-            // Update dropdown to indicate unsaved status
             ghostSelector.changeItemText(ghostSelector.getSelectedId(), "* UNSAVED GHOST *");
         } else {
             processorRef.isGhostRecording.store(false);
@@ -191,31 +186,27 @@ PluginEditor::PluginEditor (PluginProcessor& p)
     addAndMakeVisible(saveGhostButton);
 
     startTimerHz(30);
-    // Increased height to 250 to give the stacked UI strips more room
-    setSize (600, 250);
+    // Increased height to accommodate the slider
+    setSize (600, 260);
 }
 
 PluginEditor::~PluginEditor()
 {
     stopTimer();
-    
     voxButton.setLookAndFeel(nullptr);
     spaceButton.setLookAndFeel(nullptr);
     punchButton.setLookAndFeel(nullptr);
-    
     flipButton.setLookAndFeel(nullptr);
     shredButton.setLookAndFeel(nullptr);
     chopButton.setLookAndFeel(nullptr);
-    
     shredMode1.setLookAndFeel(nullptr);
     shredMode2.setLookAndFeel(nullptr);
     shredMode3.setLookAndFeel(nullptr);
-
+    chopSlider.setLookAndFeel(nullptr);
     ratio1Button.setLookAndFeel(nullptr);
     ratio3Button.setLookAndFeel(nullptr);
     ratio6Button.setLookAndFeel(nullptr);
     ratio9Button.setLookAndFeel(nullptr);
-    
     chunkyA.setLookAndFeel(nullptr);
     chunkyB.setLookAndFeel(nullptr);
 }
@@ -274,7 +265,7 @@ void PluginEditor::paint (juce::Graphics& g)
     g.drawEllipse(static_cast<float>(bounds.getWidth() - 16), static_cast<float>(bounds.getHeight() - 16), 6.0f, 6.0f, 0.5f);
 
     drawVintageMeter(g, analyzedMeter, smoothedAnalyzed);
-    drawActionMeter(g, actionMeter,    smoothedActionL, smoothedActionR); // Pass both L and R action values
+    drawActionMeter(g, actionMeter,    smoothedActionL, smoothedActionR); 
     drawVintageMeter(g, outputMeter,   smoothedOutput);
 
     auto drawMeterRecess = [&](juce::Rectangle<int> meterRect) {
@@ -299,7 +290,6 @@ void PluginEditor::paint (juce::Graphics& g)
     drawMeterRecess(actionMeter);
     drawMeterRecess(outputMeter);
 
-    // INCREASED STRIP HEIGHT to accommodate double-row UI
     int stripWidth = 180;
     int stripHeight = 85; 
     int stripY = 150; 
@@ -316,15 +306,12 @@ void PluginEditor::paint (juce::Graphics& g)
         g.drawLine(x + stripWidth, stripY, x + stripWidth, stripY + stripHeight, 1.0f);
     };
 
-    // Strip 1: Left (Chunky Switches)
     int strip3X = analyzedMeter.getX() + (analyzedMeter.getWidth() - stripWidth) / 2;
     drawStripBg(strip3X);
 
-    // Strip 2: Center (Engine & 1176 Ratio)
     int strip1X = actionMeter.getX() + (actionMeter.getWidth() - stripWidth) / 2;
     drawStripBg(strip1X);
 
-    // Strip 3: Right (Modifiers & Shred Mini-Menu)
     int strip2X = outputMeter.getX() + (outputMeter.getWidth() - stripWidth) / 2;
     drawStripBg(strip2X);
 
@@ -360,7 +347,6 @@ void PluginEditor::paint (juce::Graphics& g)
         g.fillEllipse(ledRect);
     }
     
-    // Draw Ghost Engine LED near the Red Switch
     drawGhostLED(g, chunkyB.getBounds());
 }
 
@@ -373,9 +359,6 @@ void PluginEditor::resized()
     int stripWidth = 180;
     int stripY = 150; 
     
-    // ==========================================================
-    // CENTER STRIP: Engine Buttons (Top) & 1176 Ratio Bank (Bottom)
-    // ==========================================================
     int strip1X = actionMeter.getX() + (actionMeter.getWidth() - stripWidth) / 2;
     int engineBtnW = stripWidth / 3;
     voxButton.setBounds(strip1X, stripY + 5, engineBtnW, 30);
@@ -389,9 +372,6 @@ void PluginEditor::resized()
     ratio6Button.setBounds(strip1X + (ratioBtnW * 2), ratioY, ratioBtnW, 30);
     ratio9Button.setBounds(strip1X + (ratioBtnW * 3), ratioY, ratioBtnW, 30);
 
-    // ==========================================================
-    // RIGHT STRIP: Modifiers (Top) & Shred Sub-Menu (Bottom)
-    // ==========================================================
     int strip2X = outputMeter.getX() + (outputMeter.getWidth() - stripWidth) / 2;
     int modBtnW = stripWidth / 3;
     flipButton.setBounds(strip2X, stripY + 5, modBtnW, 30);
@@ -403,20 +383,18 @@ void PluginEditor::resized()
     shredMode1.setBounds(strip2X + modBtnW, miniStripY, miniBtnW, 16);
     shredMode2.setBounds(strip2X + modBtnW + miniBtnW, miniStripY, miniBtnW, 16);
     shredMode3.setBounds(strip2X + modBtnW + (miniBtnW * 2), miniStripY, miniBtnW, 16);
+    
+    // Position CHOP Slider directly under CHOP button
+    chopSlider.setBounds(strip2X + (modBtnW * 2) + (modBtnW/2) - 12, miniStripY + 2, 24, 24);
 
-    // ==========================================================
-    // LEFT STRIP: Denon Switches & Ghost Engine Menu
-    // ==========================================================
     int strip3X = analyzedMeter.getX() + (analyzedMeter.getWidth() - stripWidth) / 2;
     int switchW = 28;
     int switchH = 40;
     int switchY = stripY + 20; 
     
-    // Position A (Read) and B (Write) switches
     chunkyA.setBounds(strip3X + 40, switchY, switchW, switchH);
     chunkyB.setBounds(strip3X + 110, switchY, switchW, switchH);
     
-    // Position the Ghost Track Dropdown & Save Button below the switches
     int menuY = switchY + switchH + 5;
     ghostSelector.setBounds(strip3X + 10, menuY, 110, 18);
     saveGhostButton.setBounds(strip3X + 125, menuY, 45, 18);
@@ -429,13 +407,25 @@ void PluginEditor::timerCallback()
     float mainLevel      = processorRef.getMainBusLevel();
     float sidechainLevel = processorRef.getSidechainBusLevel();
     
-    // Access individual L/R gain factors from the processor (we need to fetch these now)
-    // For now, we will use getCurrentGainDb() to represent Left, and we'll calculate Right based on offset
-    // In a real implementation we would fetch currentFaderGain[0] and [1] explicitly from processorRef
-    float gainDbL = processorRef.getCurrentGainDb(); // Simplification: we'll use this for Left
-    float gainDbR = processorRef.getCurrentGainDb() * 0.9f; // Fake offset to visualize dual needles until processor exposes [1]
+    float gainDbL = processorRef.getCurrentGainDb(); 
+    float gainDbR = processorRef.getCurrentGainDb() * 0.9f; 
 
     float calibrationOffset = 12.0f;
+    
+    // ==========================================================
+    // METER SOURCE DYNAMICS (GHOST CURVE VISUALIZATION)
+    // ==========================================================
+    // If we are actively reading a Ghost Track, force the Analyzed meter to display the Ghost target!
+    if (processorRef.isGhostReading.load()) {
+        #ifdef _WIN32
+            // Windows compilers require explicit cast to bypass atomic warning
+            float ghostVal = (float)processorRef.currentGhostTargetUI;
+        #else
+            float ghostVal = processorRef.currentGhostTargetUI.load();
+        #endif
+        sidechainLevel = ghostVal;
+    }
+    
     float targetAnalyzed = juce::Decibels::gainToDecibels(sidechainLevel, -90.0f) + calibrationOffset;
     float targetOutput   = juce::Decibels::gainToDecibels(mainLevel,      -90.0f) + calibrationOffset;
 
@@ -462,9 +452,7 @@ void PluginEditor::timerCallback()
     peakActive  = (mainLevel > 1.0f || sidechainLevel > 1.0f);
     actionPeak  = (std::abs(gainDbL) > 9.0f || std::abs(gainDbR) > 9.0f);
 
-    // Update LED blinking state
     currentGhostLedState = processorRef.ghostLedState.load();
-    // Toggle blink state every ~300ms (10 frames at 30fps)
     static int frameCounter = 0;
     if (++frameCounter > 10) {
         blinkState = !blinkState;
@@ -474,7 +462,7 @@ void PluginEditor::timerCallback()
     bool needsRepaint = sidechainChanged
                       || peakActive
                       || actionPeak
-                      || (currentGhostLedState == 1 || currentGhostLedState == 2) // Always repaint if blinking
+                      || (currentGhostLedState == 1 || currentGhostLedState == 2) 
                       || (std::abs(smoothedAnalyzed - prevAnalyzed) > 0.05f)
                       || (std::abs(smoothedOutput   - prevOutput)   > 0.05f)
                       || (std::abs(smoothedActionL  - prevActionL)  > 0.05f)
@@ -671,7 +659,6 @@ void PluginEditor::drawActionMeter(juce::Graphics& g, juce::Rectangle<int> bound
                    30, 16, juce::Justification::centred);
     }
 
-    // Lambda to calculate needle tip position
     auto getNeedleTip = [&](float db, float length) -> juce::Point<float> {
         float angleFromVertical;
         if (db <= -9.0f)    angleFromVertical =  maxAngleDegrees; 
@@ -682,14 +669,12 @@ void PluginEditor::drawActionMeter(juce::Graphics& g, juce::Rectangle<int> bound
         return { pivotX + length * std::cos(angle), pivotY + length * std::sin(angle) };
     };
 
-    // Draw RIGHT Needle (Red) first so it's behind the left needle if they overlap
-    juce::Point<float> tipR = getNeedleTip(gainDbR, needleLength * 0.95f); // Slightly shorter
+    juce::Point<float> tipR = getNeedleTip(gainDbR, needleLength * 0.95f); 
     g.setColour(juce::Colours::red.withAlpha(0.7f));
     g.drawLine(pivotX, pivotY, tipR.x, tipR.y, 2.0f);
 
-    // Draw LEFT Needle (Black) 
     juce::Point<float> tipL = getNeedleTip(gainDbL, needleLength);
-    g.setColour(juce::Colours::black.withAlpha(0.5f)); // Shadow
+    g.setColour(juce::Colours::black.withAlpha(0.5f)); 
     g.drawLine(pivotX + 1, pivotY + 1, tipL.x + 1, tipL.y + 1, 2.0f);
     g.setColour(juce::Colours::black);
     g.drawLine(pivotX, pivotY, tipL.x, tipL.y, 2.0f);
@@ -753,28 +738,25 @@ void PluginEditor::drawPeakLED(juce::Graphics& g, float x, float y)
 
 void PluginEditor::drawGhostLED(juce::Graphics& g, juce::Rectangle<int> switchBounds)
 {
-    // Position the LED slightly above and to the right of Switch B
     float ledX = static_cast<float>(switchBounds.getRight() + 4);
     float ledY = static_cast<float>(switchBounds.getY() - 10);
     juce::Rectangle<float> ledRect(ledX, ledY, 6.0f, 6.0f);
 
-    juce::Colour ledColor(0xff222222); // Default off (dark grey)
+    juce::Colour ledColor(0xff222222); 
 
-    if (currentGhostLedState == 1) { // Blinking Red
+    if (currentGhostLedState == 1) { 
         ledColor = blinkState ? juce::Colours::red : juce::Colour(0xff440000);
     } 
-    else if (currentGhostLedState == 2) { // Blinking Green
+    else if (currentGhostLedState == 2) { 
         ledColor = blinkState ? juce::Colours::lime : juce::Colour(0xff004400);
     }
-    else if (currentGhostLedState == 3) { // Solid Green
+    else if (currentGhostLedState == 3) { 
         ledColor = juce::Colours::lime;
     }
 
-    // Draw the LED
     g.setColour(ledColor);
     g.fillEllipse(ledRect);
     
-    // Add a slight glow if active
     if ((currentGhostLedState == 3) || (blinkState && currentGhostLedState > 0)) {
         g.setColour(ledColor.withAlpha(0.4f));
         g.fillEllipse(ledRect.expanded(2.0f));

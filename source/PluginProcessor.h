@@ -60,12 +60,17 @@ public:
     float getMainBusLevel() const { return mainBusLevel.load(); }
     float getSidechainBusLevel() const { return sidechainBusLevel.load(); }
     float getCurrentGainDb() const { return currentGainDb.load(); }
+    std::atomic<float> currentGhostTargetUI { 0.0f }; // ADD THIS to PluginProcessor.h
     
     // ==========================================================
     // MODE & MODIFIER ENGINES
     // ==========================================================
     std::atomic<int> currentMode { 0 };     // 0=Base, 1=VOX, 2=SPACE, 3=PUNCH
-    std::atomic<int> currentModifier { 0 }; // 0=Clean, 1=FLIP, 2=SHRED, 3=CHOP
+    // The Purple Modifiers (Now independent for chaining!)
+    std::atomic<bool> isFlipActive { false };
+    std::atomic<bool> isShredActive { false };
+    std::atomic<bool> isChopActive { false };
+    std::atomic<float> chopThreshold { 0.10f }; // Default 10% threshold
     std::atomic<int> currentRatio { 1 };
     
     // The SHRED Trilogy

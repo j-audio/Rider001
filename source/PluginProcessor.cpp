@@ -122,7 +122,10 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     
 
     int mode = currentMode.load();
-    int mod = currentModifier.load(); 
+    bool flipOn = isFlipActive.load();
+    bool shredOn = isShredActive.load();
+    bool chopOn = isChopActive.load();
+    float chopThresh = chopThreshold.load();
     int ratio = currentRatio.load(); 
     int shredMode = currentShredMode.load();
 
@@ -200,10 +203,15 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 
         if (inputRMS[ch] >= 0.00001f)
         {
-            // IF GHOST IS ACTIVE: Ignore the sidechain, ride strictly to the recorded timeline curve.
+            // IF GHOST IS ACTIVE: Safe, Anti-Jitter Ghost Riding
             if (hasGhostData) {
-                float rawTargetGain = ghostTarget / (inputRMS[ch] + 0.00001f);
-                gainFactor[ch] = std::clamp(rawTargetGain, 0.0f, 32.0f);
+                // Smooth the live input to prevent micro-oscillations against the static Ghost data
+                float smoothedLiveInput = (inputRMS[ch] * 0.1f) + (currentMacroPeak[ch] * 0.9f);
+                
+                float rawTargetGain = ghostTarget / (smoothedLiveInput + 0.00001f);
+                
+                // Strictly clamp Ghost corrections to +/- 12dB (0.25x to 4.0x) to prevent drum explosions
+                gainFactor[ch] = std::clamp(rawTargetGain, 0.25f, 4.0f); 
             }
             // OTHERWISE: Run the standard J-RIDER Sidechain Engine
             else if (dryRMS[ch] < 0.00001f) {
@@ -257,9 +265,14 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 
                 gainFactor[ch] = std::min(rawTargetGain, 32.0f);
                 
-                // SPACE MODE SAFETY CAP: Prevent tails from blowing out the speakers
+                // SPACE MODE OVERRIDE: If the input crosses the threshold, instantly kill the boost
                 if (mode == 2) {
-                    gainFactor[ch] = std::min(gainFactor[ch], 8.0f); 
+                    float thresholdX = currentMacroPeak[ch] * 0.25f;
+                    if (inputRMS[ch] >= thresholdX) {
+                        gainFactor[ch] = 1.0f; // Instant drop to unity
+                    } else {
+                        gainFactor[ch] = std::min(gainFactor[ch], 8.0f); // Safe cap for tails
+                    }
                 }
             }
         }
@@ -323,31 +336,26 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
             float sampleVal = channelData[sampleIndex];
             float appliedGain = currentFaderGain[ch];
 
-            // Purple Modifiers
-            if (mod == 1) { 
+            float appliedGain = currentFaderGain[ch];
+
+            // 1. FLIP (The Anti-Groove)
+            if (flipOn) { 
                 appliedGain = 1.0f / std::max(currentFaderGain[ch], 0.1f); 
             } 
-            else if (mod == 3) { 
-                if (dryRMS[ch] < (currentMacroPeak[ch] * 0.1f)) appliedGain = 0.0f;
-            }
-
+            
+            // Apply the volume ride (or the flipped ride)
             sampleVal *= appliedGain;
 
-            // 2. THE SHRED TRILOGY
-            if (mod == 2) {
+            // 2. SHRED TRILOGY (The Destroyer)
+            if (shredOn) {
                 float rawSample = sampleVal; // Keep a copy of the dry signal for blending
 
                 if (shredMode == 1) { 
-                    // MODE I: THE SHADOW VERB (Living Wavefolder)
                     float drive = 5.0f + (currentMacroPeak[ch] * 25.0f); 
                     float folded = std::sin(sampleVal * drive);
-                    
-                    // Radically reduced the Wet mix to completely eliminate the volume explosion
                     sampleVal = (rawSample * 0.5f) + (folded * 0.25f);
                 } 
                 else if (shredMode == 2) { 
-                    // MODE II: THE CRUSHED SYNTH (Tempo S&H)
-                    // Increased multiplier to 0.45f to create musical "blocks" instead of sandy glitching
                     int holdTarget = juce::jmax(1, (int)(musicalRelease * sampleRateSafe * 0.45f));
                     if (holdCounter[ch] >= holdTarget) {
                         heldSample[ch] = sampleVal;
@@ -356,11 +364,10 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                         sampleVal = heldSample[ch];
                         holdCounter[ch]++;
                     }
-                    // Blend 40% Dry signal back in to preserve the musical tone of guitars/synths
-                    sampleVal = (rawSample * 0.4f) + (sampleVal * 0.6f * 0.5f); 
+                    float fatDry = std::tanh(rawSample * 2.0f) * 0.5f;
+                    sampleVal = fatDry + (sampleVal * 0.8f); 
                 } 
                 else if (shredMode == 3) { 
-                    // MODE III: THE BLACK HOLE (Wall of Fuzz)
                     float fuzz = std::tanh(sampleVal * 50.0f);
                     sampleVal = fuzz * 0.3f; 
                 }
@@ -368,6 +375,16 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                 heldSample[ch] = sampleVal;
                 holdCounter[ch] = 0;
             }
+
+            // 3. CHOP (The Rhythmic Gate)
+            // Slices the audio to absolute zero if the sidechain falls below the dynamic knob threshold
+            if (chopOn) { 
+                if (dryRMS[ch] < (currentMacroPeak[ch] * chopThresh)) {
+                    sampleVal = 0.0f;
+                }
+            }
+
+            // 4. Clipper
 
             // Clipper
             if (isTransient) {
