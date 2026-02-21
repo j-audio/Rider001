@@ -120,7 +120,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     float secondsPer128th = secondsPerQuarter / 32.0f;
     float musicalRelease = std::clamp(secondsPer128th * (2.0f / 3.0f), 0.002f, 0.040f);
     
-
     int mode = currentMode.load();
     bool flipOn = isFlipActive.load();
     bool shredOn = isShredActive.load();
@@ -149,7 +148,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         else 
         {
             // Safety Append Logic (The "Punch-In")
-            // Allow recording if we are exactly where we left off, OR if the memory map is empty.
             bool isAppending = (ghostMapL.size() == 0 || ppqIndex <= ghostMapL.size() + 2);
 
             if (isAppending) 
@@ -158,13 +156,13 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                 
                 // Expand the memory vector to fit the new timestamp
                 if (ppqIndex >= ghostMapL.size()) {
-                    ghostMapL.resize(ppqIndex + 1, 0.0f);
-                    ghostMapR.resize(ppqIndex + 1, 0.0f);
+                    ghostMapL.resize((size_t)ppqIndex + 1, 0.0f);
+                    ghostMapR.resize((size_t)ppqIndex + 1, 0.0f);
                 }
                 
                 // Write the master bus volume into the timeline memory
-                ghostMapL[ppqIndex] = inputRMS[0];
-                ghostMapR[ppqIndex] = inputRMS[1];
+                ghostMapL[(size_t)ppqIndex] = inputRMS[0];
+                ghostMapR[(size_t)ppqIndex] = inputRMS[1];
                 
                 lastRecordedPPQ.store(currentPPQ);
             } 
@@ -190,7 +188,8 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         // Safety check: Ensure we aren't in negative pre-roll time, and memory exists
         if (readMode && isPlaying && ppqIndex >= 0 && ppqIndex < ghostMapL.size()) {
             hasGhostData = true;
-            ghostTarget = (ch == 0) ? ghostMapL[ppqIndex] : ghostMapR[ppqIndex];
+            ghostTarget = (ch == 0) ? ghostMapL[(size_t)ppqIndex] : ghostMapR[(size_t)ppqIndex];
+            if (ch == 0) currentGhostTargetUI.store(ghostTarget); // Pass Left target to UI meter
         }
 
         // Smart Macro Peak Tracker (Per Channel)
@@ -336,8 +335,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
             float sampleVal = channelData[sampleIndex];
             float appliedGain = currentFaderGain[ch];
 
-            float appliedGain = currentFaderGain[ch];
-
             // 1. FLIP (The Anti-Groove)
             if (flipOn) { 
                 appliedGain = 1.0f / std::max(currentFaderGain[ch], 0.1f); 
@@ -385,8 +382,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
             }
 
             // 4. Clipper
-
-            // Clipper
             if (isTransient) {
                 sampleVal = std::tanh(sampleVal * 1.05f); 
             } else {
