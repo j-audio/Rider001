@@ -39,8 +39,6 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     currentFaderGain[1] = 1.0f;
     currentMacroPeak[0] = 0.0001f;
     currentMacroPeak[1] = 0.0001f;
-    liveMacroPeak[0]    = 0.0001f;
-    liveMacroPeak[1]    = 0.0001f;
 
     double blocksPerSecond = sampleRate / static_cast<double>(samplesPerBlock);
     macroPeakRelease = static_cast<float>(std::exp(-1.0 / (2.0 * blocksPerSecond)));
@@ -91,10 +89,9 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     bool forceExt = forceExternalSidechain.load();
     bool hasSidechain = (getBusCount(true) > 1 && getBus(true, 1)->isEnabled());
     
-    // ISSUE 1 FIX: Safely route the guide signal based on UI buttons and actual DAW routing
+    // Safely route the guide signal based on UI buttons and actual DAW routing
     for (int ch = 0; ch < numChannels; ++ch) {
         if (forceExt && !hasSidechain) {
-            // User requested EXT but plugged nothing in -> Silence the engine!
             guideRMS[ch] = 0.0f;
             guidePeak[ch] = 0.0f;
         } 
@@ -105,31 +102,13 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
             guidePeak[ch] = scBuffer.getMagnitude(scCh, 0, scBuffer.getNumSamples());
         } 
         else {
-            // Internal Mode
             guideRMS[ch] = inputRMS[ch];
             guidePeak[ch] = inputPeak[ch];
         }
     }
 
     // ==========================================================
-    // SMOOTH MACRO PEAK TRACKING
-    // ==========================================================
-    for (int ch = 0; ch < numChannels; ++ch) {
-        // Track the pure live input for flawless apples-to-apples division later
-        if (inputRMS[ch] > liveMacroPeak[ch]) liveMacroPeak[ch] = inputRMS[ch];
-        else liveMacroPeak[ch] *= macroPeakRelease;
-        if (liveMacroPeak[ch] < 0.0001f) liveMacroPeak[ch] = 0.0001f;
-        
-        // Track the guide/target
-        if (guideRMS[ch] > currentMacroPeak[ch]) currentMacroPeak[ch] = guideRMS[ch];
-        else currentMacroPeak[ch] *= macroPeakRelease;
-        if (currentMacroPeak[ch] < 0.0001f) currentMacroPeak[ch] = 0.0001f;
-    }
-
-    sidechainBusLevel.store(std::max(guideRMS[0], guideRMS[1]));
-
-    // ==========================================================
-    // TEMPO & PLAYHEAD ENGINE
+    // TEMPO & PLAYHEAD ENGINE (WITH JUMP DETECTOR)
     // ==========================================================
     double currentBPM = 120.0;
     double currentPPQ = 0.0;
@@ -143,6 +122,16 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         }
     }
     
+    // Loop Jump Detection: If playhead jumps backwards or skips more than 0.5 beats, reset tracking!
+    static double previousPPQ = 0.0;
+    bool playheadJumped = (std::abs(currentPPQ - previousPPQ) > 0.5) || (!isPlaying);
+    previousPPQ = currentPPQ;
+    
+    if (playheadJumped) {
+        currentMacroPeak[0] = 0.0001f;
+        currentMacroPeak[1] = 0.0001f;
+    }
+
     float secondsPerQuarter = 60.0f / (float)currentBPM;
     float secondsPer128th = secondsPerQuarter / 32.0f;
     float musicalRelease = std::clamp(secondsPer128th * (2.0f / 3.0f), 0.002f, 0.040f);
@@ -156,12 +145,10 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     int shredMode = currentShredMode.load();
 
     // ==========================================================
-    // THE GHOST ENGINE: HIGH RESOLUTION RECORDING
+    // THE GHOST ENGINE: RECORDING LOGIC
     // ==========================================================
     bool writeMode = isGhostRecording.load();
     bool readMode = isGhostReading.load();
-    
-    // Massive resolution increase! 50 scans per beat ensures flawless micro-groove capture
     int ppqIndex = (int)(currentPPQ * 50.0); 
     
     if (writeMode) 
@@ -174,112 +161,126 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         }
         else 
         {
-            bool isAppending = (ghostMapL.size() == 0 || ppqIndex <= ghostMapL.size() + 2);
-            if (isAppending) 
-            {
-                ghostLedState.store(2); 
-                if (ppqIndex >= ghostMapL.size()) {
-                    ghostMapL.resize((size_t)ppqIndex + 1, 0.0f);
-                    ghostMapR.resize((size_t)ppqIndex + 1, 0.0f);
-                }
-                // We now record the beautifully smoothed macro peak, NOT the twitchy RMS!
-                ghostMapL[(size_t)ppqIndex] = currentMacroPeak[0];
-                ghostMapR[(size_t)ppqIndex] = currentMacroPeak[1];
-                lastRecordedPPQ.store(currentPPQ);
-            } else {
-                ghostLedState.store(1); 
+            ghostLedState.store(2); 
+            if (ppqIndex >= ghostMapL.size()) {
+                ghostMapL.resize((size_t)ppqIndex + 1, 0.0f);
+                ghostMapR.resize((size_t)ppqIndex + 1, 0.0f);
             }
+            // RECORDING TRUE RMS FOR PERFECT METER CALIBRATION
+            ghostMapL[(size_t)ppqIndex] = guideRMS[0];
+            ghostMapR[(size_t)ppqIndex] = guideRMS[1];
+            lastRecordedPPQ.store(currentPPQ);
         }
     } 
     else {
         ghostLedState.store(0);
     }
 
-    bool hasGhostData = (readMode && isPlaying && ppqIndex >= 0 && ppqIndex < ghostMapL.size() && ghostMapL.size() > 0);
+    // ==========================================================
+    // UNIFIED SOURCE OF TRUTH
+    // ==========================================================
+    bool hasGhostData = (readMode && isPlaying && ppqIndex >= 0 && ppqIndex < ghostMapL.size());
+
+    for (int ch = 0; ch < numChannels; ++ch) {
+        if (hasGhostData) {
+            float ghostVal = (ch == 0) ? ghostMapL[(size_t)ppqIndex] : ghostMapR[(size_t)ppqIndex];
+            guideRMS[ch] = ghostVal;
+            guidePeak[ch] = ghostVal; 
+            if (ch == 0) currentGhostTargetUI.store(ghostVal);
+        }
+        // SCENARIO B & C are already handled in the Initial Measurement Arrays above
+    }
+
+    sidechainBusLevel.store(std::max(guideRMS[0], guideRMS[1]));
 
     // ==========================================================
     // DUAL MONO TARGET CALCULATION
     // ==========================================================
     for (int ch = 0; ch < numChannels; ++ch) 
     {
-        // ISSUE 2 FIX: Empty Ghost Safety Check
+        // ISSUE 3 FIX: Null Ghost Track Silencer
         if (readMode && !hasGhostData) {
-            gainFactor[ch] = 1.0f; // Perfect silence/unity if empty
+            gainFactor[ch] = 0.0f; // Silence!
             if (ch == 0) currentGhostTargetUI.store(0.0f);
             continue; 
         }
 
+        if (guideRMS[ch] > currentMacroPeak[ch]) {
+            currentMacroPeak[ch] = guideRMS[ch]; 
+        } else {
+            currentMacroPeak[ch] *= macroPeakRelease; 
+        }
+        if (currentMacroPeak[ch] < 0.0001f) currentMacroPeak[ch] = 0.0001f;
+
         if (inputRMS[ch] >= 0.00001f)
         {
-            float desiredTargetLevel = guideRMS[ch];
-            float liveInputBase = inputRMS[ch];
+            if (guideRMS[ch] < 0.00001f) {
+                gainFactor[ch] = 0.0f;
+            } else {
+                float desiredTargetLevel = guideRMS[ch]; 
+                float liveInputBase = inputRMS[ch]; // Apples to Apples TRUE division
 
-            if (hasGhostData) {
-                // Ghost replaces the target with the recorded peak, and replaces the denominator with the live peak
-                float ghostTarget = (ch == 0) ? ghostMapL[(size_t)ppqIndex] : ghostMapR[(size_t)ppqIndex];
-                desiredTargetLevel = ghostTarget;
-                liveInputBase = liveMacroPeak[ch]; // Appless-to-Apples division!
-                if (ch == 0) currentGhostTargetUI.store(ghostTarget);
-            }
+                // SPACE MODE
+                if (mode == 2) {
+                    float thresholdX = currentMacroPeak[ch] * 0.25f;  
+                    float thresholdY = currentMacroPeak[ch] * 0.01f;  
+                    float spaceExponent = (ratio == 1) ? 0.5f : (1.0f / (float)ratio);
 
-            // Standard Engine Math (Applies to both Ghost targets and normal sidechains)
-            if (mode == 2) {
-                float thresholdX = currentMacroPeak[ch] * 0.25f;  
-                float thresholdY = currentMacroPeak[ch] * 0.01f;  
-                float spaceExponent = (ratio == 1) ? 0.5f : (1.0f / (float)ratio);
-
-                if (desiredTargetLevel < thresholdX && desiredTargetLevel > thresholdY) {
-                    desiredTargetLevel = thresholdX * std::pow(desiredTargetLevel / thresholdX, spaceExponent);
-                } 
-                else if (desiredTargetLevel <= thresholdY && thresholdY > 0.00001f) {
-                    float maxMultiplier = std::pow(thresholdX / thresholdY, spaceExponent); 
-                    float fadeRatio = desiredTargetLevel / thresholdY; 
-                    float evaporatingMultiplier = 1.0f + ((maxMultiplier - 1.0f) * fadeRatio);
-                    desiredTargetLevel = desiredTargetLevel * evaporatingMultiplier;
+                    if (desiredTargetLevel < thresholdX && desiredTargetLevel > thresholdY) {
+                        desiredTargetLevel = thresholdX * std::pow(desiredTargetLevel / thresholdX, spaceExponent);
+                    } 
+                    else if (desiredTargetLevel <= thresholdY && thresholdY > 0.00001f) {
+                        float maxMultiplier = std::pow(thresholdX / thresholdY, spaceExponent); 
+                        float fadeRatio = desiredTargetLevel / thresholdY; 
+                        float evaporatingMultiplier = 1.0f + ((maxMultiplier - 1.0f) * fadeRatio);
+                        desiredTargetLevel = desiredTargetLevel * evaporatingMultiplier;
+                    }
                 }
-            }
 
-            float rawTargetGain = desiredTargetLevel / (liveInputBase + 0.00001f);
+                float rawTargetGain = desiredTargetLevel / (liveInputBase + 0.00001f);
 
-            if (mode == 1 && ratio > 1) {
-                float targetGainDb = 20.0f * std::log10(rawTargetGain);
-                targetGainDb *= (float)ratio; 
-                rawTargetGain = std::pow(10.0f, targetGainDb / 20.0f);
-            }
-
-            if (mode == 3) {
-                float dryCrest = guidePeak[ch] / (guideRMS[ch] + 0.00001f);
-                float inputCrest = inputPeak[ch] / (inputRMS[ch] + 0.00001f);
-                float loudnessComp = 1.0f + (1.0f - juce::jmin(1.0f, guidePeak[ch]));
-                float punchMultiplier = 0.09f * (float)ratio;
-
-                if (dryCrest > inputCrest + 0.05f) {
-                    float restorationAmount = dryCrest / inputCrest;
-                    rawTargetGain *= (restorationAmount * loudnessComp * 0.8f); 
+                // VOX MODE
+                if (mode == 1 && ratio > 1) {
+                    float targetGainDb = 20.0f * std::log10(rawTargetGain);
+                    targetGainDb *= (float)ratio; 
+                    rawTargetGain = std::pow(10.0f, targetGainDb / 20.0f);
                 }
-                else if (std::abs(dryCrest - inputCrest) <= 0.05f && dryCrest > 2.0f) {
-                    float smartBoost = 1.0f + (punchMultiplier * dryCrest * loudnessComp);
-                    if (smartBoost > 3.0f) smartBoost = 3.0f; 
-                    rawTargetGain *= smartBoost;
-                }
-            }
 
-            gainFactor[ch] = std::clamp(rawTargetGain, 0.0f, 32.0f);
-            
-            if (hasGhostData) {
-                gainFactor[ch] = std::clamp(gainFactor[ch], 0.25f, 4.0f); 
-            }
-            
-            if (mode == 2) {
-                float thresholdX = currentMacroPeak[ch] * 0.25f;
-                if (inputRMS[ch] >= thresholdX) {
-                    gainFactor[ch] = 1.0f; 
-                } else {
-                    gainFactor[ch] = std::min(gainFactor[ch], 8.0f); 
+                // PUNCH MODE
+                if (mode == 3) {
+                    float dryCrest = guidePeak[ch] / (guideRMS[ch] + 0.00001f);
+                    float inputCrest = inputPeak[ch] / (inputRMS[ch] + 0.00001f);
+                    float loudnessComp = 1.0f + (1.0f - juce::jmin(1.0f, guidePeak[ch]));
+                    float punchMultiplier = 0.09f * (float)ratio;
+
+                    if (dryCrest > inputCrest + 0.05f) {
+                        float restorationAmount = dryCrest / inputCrest;
+                        rawTargetGain *= (restorationAmount * loudnessComp * 0.8f); 
+                    }
+                    else if (std::abs(dryCrest - inputCrest) <= 0.05f && dryCrest > 2.0f) {
+                        float smartBoost = 1.0f + (punchMultiplier * dryCrest * loudnessComp);
+                        if (smartBoost > 3.0f) smartBoost = 3.0f; 
+                        rawTargetGain *= smartBoost;
+                    }
+                }
+
+                gainFactor[ch] = std::clamp(rawTargetGain, 0.0f, 32.0f);
+                
+                if (hasGhostData) {
+                    gainFactor[ch] = std::clamp(gainFactor[ch], 0.25f, 4.0f); 
+                }
+                
+                if (mode == 2) {
+                    float thresholdX = currentMacroPeak[ch] * 0.25f;
+                    if (inputRMS[ch] >= thresholdX) {
+                        gainFactor[ch] = 1.0f; 
+                    } else {
+                        gainFactor[ch] = std::min(gainFactor[ch], 8.0f); 
+                    }
                 }
             }
         } else {
-            gainFactor[ch] = 1.0f; // No input = no action
+            gainFactor[ch] = 1.0f; 
         }
     }
 
@@ -290,7 +291,7 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     float releaseTime = 0.10f; 
     
     if (readMode) {
-        attackTime = 0.25f;  // Heavy 250ms Ghost Glide prevents needle jitter
+        attackTime = 0.25f;  
         releaseTime = 0.25f; 
     }
     else if (mode == 1) { 
@@ -317,6 +318,11 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     {
         bool isTransient = (mode == 3 && gainFactor[ch] > 1.05f);
         auto* channelData = mainBuffer.getWritePointer(ch);
+        
+        // ISSUE 4 FIX: Instantly snap the fader to the correct position if the DAW loops!
+        if (playheadJumped) {
+            currentFaderGain[ch] = gainFactor[ch];
+        }
 
        for (int sampleIndex = 0; sampleIndex < mainBuffer.getNumSamples(); ++sampleIndex)
         {
@@ -381,10 +387,15 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                 }
             }
 
-            if (isTransient) {
+            // ISSUE 1 FIX: Transparent Hard Clipper for Base & Ghost modes.
+            if (shredOn) {
+                sampleVal = std::clamp(sampleVal, -1.0f, 1.0f);
+            } 
+            else if (isTransient) {
                 sampleVal = std::tanh(sampleVal * 1.05f); 
-            } else {
-                sampleVal = std::tanh(sampleVal);
+            } 
+            else {
+                sampleVal = std::clamp(sampleVal, -1.0f, 1.0f);
             }
 
             channelData[sampleIndex] = sampleVal;
