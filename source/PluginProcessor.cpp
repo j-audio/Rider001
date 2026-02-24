@@ -73,7 +73,7 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     int numChannels = std::min(mainBuffer.getNumChannels(), 2); 
 
     // ==========================================================
-    // INITIAL MEASUREMENT ARRAYS
+    // INITIAL MEASUREMENT ARRAYSS
     // ==========================================================
     float inputRMS[2] = {0.0f, 0.0f};
     float inputPeak[2] = {0.0f, 0.0f};
