@@ -167,22 +167,31 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     // ==========================================================
     // UNIFIED SOURCE OF TRUTH (The Heartbeat Fix)
     // ==========================================================
+    // ==========================================================
+    // UNIFIED SOURCE OF TRUTH
+    // ==========================================================
     bool hasGhostData = (readMode && isPlaying && ppqIndex >= 0 && ppqIndex < ghostMapL.size());
 
     for (int ch = 0; ch < numChannels; ++ch) {
         if (hasGhostData) {
-            // SCENARIO C: Ghost Memory is the Sidechain
+            // SCENARIO A: Ghost Memory is the Absolute Target
             float ghostVal = (ch == 0) ? ghostMapL[(size_t)ppqIndex] : ghostMapR[(size_t)ppqIndex];
             dryRMS[ch] = ghostVal;
             dryPeak[ch] = ghostVal; 
             if (ch == 0) currentGhostTargetUI.store(ghostVal);
         }
-        else if (!hasSidechain) {
-            // SCENARIO B: No Sidechain, use self (Main Input)
+        else if (forceExt && !hasSidechain) {
+            // SCENARIO B: User selected EXT, but forgot to route a signal in the DAW. 
+            // Result: Absolute silence (0.0f) so the plugin behaves like a true external gate.
+            dryRMS[ch] = 0.0f;
+            dryPeak[ch] = 0.0f;
+        }
+        else if (!forceExt) {
+            // SCENARIO C: User selected IN. Plugin reacts to itself.
             dryRMS[ch] = inputRMS[ch];
             dryPeak[ch] = inputPeak[ch];
         }
-        // SCENARIO A: External Sidechain already loaded in dryRMS above.
+        // SCENARIO D: External Sidechain is connected and routed correctly. (Already loaded in dryRMS above).
     }
 
     // Update UI Sidechain Meter (Highest of the Universal Source)
@@ -225,15 +234,19 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                     }
                 }
 
-                // Calculate required gain
+                // Calculate true required gain
                 float liveInputBase = inputRMS[ch];
-                
-                // ANTI-JITTER ANCHOR: Only needed when mapping static 125ms Ghost blocks against live 5ms audio
-                if (hasGhostData) {
-                     liveInputBase = (inputRMS[ch] * 0.1f) + (currentMacroPeak[ch] * 0.9f);
-                }
+                float rawTargetGain = 1.0f;
 
-                float rawTargetGain = desiredTargetLevel / (liveInputBase + 0.00001f);
+                if (hasGhostData) {
+                    // PURE GAIN MATCHING: If Ghost says 0.5 and live is 0.25, multiply by 2.0 to match!
+                    // We remove the peak-smoothing to eliminate the downward bias. 
+                    // Jitter is now handled entirely by the 250ms smooth ballistics below.
+                    rawTargetGain = desiredTargetLevel / (liveInputBase + 0.00001f);
+                } else {
+                    // Standard J-RIDER dynamic matching
+                    rawTargetGain = desiredTargetLevel / (liveInputBase + 0.00001f);
+                }
 
                 // VOX MODE
                 if (mode == 1 && ratio > 1) {
