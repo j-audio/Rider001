@@ -47,7 +47,8 @@ private:
     // TRUE DUAL MONO MEMORY ARRAYS (0 = Left, 1 = Right)
     // ==========================================================
     float currentFaderGain[2] { 1.0f, 1.0f }; 
-    float currentMacroPeak[2] { 0.0001f, 0.0001f };
+    float currentMacroPeak[2] { 0.0001f, 0.0001f }; // Used for the guide/target
+    float liveMacroPeak[2]    { 0.0001f, 0.0001f }; // Dedicated tracker for the live input
 
     float macroPeakRelease { 0.99f }; 
 
@@ -60,7 +61,7 @@ public:
     float getMainBusLevel() const { return mainBusLevel.load(); }
     float getSidechainBusLevel() const { return sidechainBusLevel.load(); }
     float getCurrentGainDb() const { return currentGainDb.load(); }
-    std::atomic<float> currentGhostTargetUI { 0.0f }; // ADD THIS to PluginProcessor.h
+    std::atomic<float> currentGhostTargetUI { 0.0f }; 
     
     // ==========================================================
     // MODE & MODIFIER ENGINES
@@ -70,12 +71,12 @@ public:
     std::atomic<bool> isFlipActive { false };
     std::atomic<bool> isShredActive { false };
     std::atomic<bool> isChopActive { false };
-    std::atomic<float> chopThreshold { 0.10f }; // Default 10% threshold
+    std::atomic<float> chopThreshold { 0.10f }; 
     std::atomic<int> currentRatio { 1 };
     
     // The SHRED Trilogy
-    std::atomic<int> currentShredMode { 1 }; // 1=Wavefolder, 2=TempoCrush, 3=BlackHole
-    float heldSample[8] { 0.0f }; // Memory for the S&H algorithm 
+    std::atomic<int> currentShredMode { 1 }; 
+    float heldSample[8] { 0.0f };  
     int holdCounter[8] { 0 };   
     
     // ==========================================================
@@ -84,15 +85,13 @@ public:
     std::atomic<bool> isGhostRecording { false }; 
     std::atomic<bool> isGhostReading { false };   
 
-    // We store the timeline as an array of RMS values. 
-    // We log the volume every 0.25 PPQ (16th note resolution).
     std::vector<float> ghostMapL; 
     std::vector<float> ghostMapR;
     std::atomic<bool> forceExternalSidechain { false }; // False = IN, True = EXT
     
     // UI Feedback States
-    std::atomic<int> ghostLedState { 0 }; // 0=Off, 1=Blinking Red, 2=Blinking Green, 3=Solid Green
-    std::atomic<double> lastRecordedPPQ { 0.0 };// Counter for the S&H algorithm
+    std::atomic<int> ghostLedState { 0 }; 
+    std::atomic<double> lastRecordedPPQ { 0.0 };
 
 private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginProcessor)
