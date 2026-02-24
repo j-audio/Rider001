@@ -39,6 +39,8 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     currentFaderGain[1] = 1.0f;
     currentMacroPeak[0] = 0.0001f;
     currentMacroPeak[1] = 0.0001f;
+    liveMacroPeak[0]    = 0.0001f;
+    liveMacroPeak[1]    = 0.0001f;
 
     double blocksPerSecond = sampleRate / static_cast<double>(samplesPerBlock);
     macroPeakRelease = static_cast<float>(std::exp(-1.0 / (2.0 * blocksPerSecond)));
@@ -108,7 +110,7 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     }
 
     // ==========================================================
-    // TEMPO & PLAYHEAD ENGINE (WITH JUMP DETECTOR)
+    // TEMPO & PLAYHEAD ENGINE (WITH SNAP DETECTOR)
     // ==========================================================
     double currentBPM = 120.0;
     double currentPPQ = 0.0;
@@ -122,12 +124,18 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         }
     }
     
-    // Loop Jump Detection: If playhead jumps backwards or skips more than 0.5 beats, reset tracking!
     static double previousPPQ = 0.0;
-    bool playheadJumped = (std::abs(currentPPQ - previousPPQ) > 0.5) || (!isPlaying);
-    previousPPQ = currentPPQ;
+    static bool wasPlaying = false;
     
-    if (playheadJumped) {
+    // FIX 1 & 3: Detect if we just pressed Play, or if the DAW looped backwards
+    bool justStartedPlaying = isPlaying && !wasPlaying;
+    bool jumpedBackward = currentPPQ < previousPPQ;
+    bool forceSnapFader = justStartedPlaying || (isPlaying && jumpedBackward);
+    
+    previousPPQ = currentPPQ;
+    wasPlaying = isPlaying;
+    
+    if (forceSnapFader) {
         currentMacroPeak[0] = 0.0001f;
         currentMacroPeak[1] = 0.0001f;
     }
@@ -161,15 +169,20 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         }
         else 
         {
-            ghostLedState.store(2); 
-            if (ppqIndex >= ghostMapL.size()) {
-                ghostMapL.resize((size_t)ppqIndex + 1, 0.0f);
-                ghostMapR.resize((size_t)ppqIndex + 1, 0.0f);
+            bool isAppending = (ghostMapL.size() == 0 || ppqIndex <= ghostMapL.size() + 2);
+            if (isAppending) 
+            {
+                ghostLedState.store(2); 
+                if (ppqIndex >= ghostMapL.size()) {
+                    ghostMapL.resize((size_t)ppqIndex + 1, 0.0f);
+                    ghostMapR.resize((size_t)ppqIndex + 1, 0.0f);
+                }
+                ghostMapL[(size_t)ppqIndex] = guideRMS[0];
+                ghostMapR[(size_t)ppqIndex] = guideRMS[1];
+                lastRecordedPPQ.store(currentPPQ);
+            } else {
+                ghostLedState.store(1); 
             }
-            // RECORDING TRUE RMS FOR PERFECT METER CALIBRATION
-            ghostMapL[(size_t)ppqIndex] = guideRMS[0];
-            ghostMapR[(size_t)ppqIndex] = guideRMS[1];
-            lastRecordedPPQ.store(currentPPQ);
         }
     } 
     else {
@@ -188,7 +201,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
             guidePeak[ch] = ghostVal; 
             if (ch == 0) currentGhostTargetUI.store(ghostVal);
         }
-        // SCENARIO B & C are already handled in the Initial Measurement Arrays above
     }
 
     sidechainBusLevel.store(std::max(guideRMS[0], guideRMS[1]));
@@ -198,11 +210,18 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     // ==========================================================
     for (int ch = 0; ch < numChannels; ++ch) 
     {
-        // ISSUE 3 FIX: Null Ghost Track Silencer
-        if (readMode && !hasGhostData) {
-            gainFactor[ch] = 0.0f; // Silence!
-            if (ch == 0) currentGhostTargetUI.store(0.0f);
-            continue; 
+        if (readMode) {
+            // FIX 2: If Paused, needle rests at 0 (Unity). If exhausted, silence.
+            if (!isPlaying) {
+                gainFactor[ch] = 1.0f; // Paused -> Unity
+                if (ch == 0) currentGhostTargetUI.store(0.0f);
+                continue;
+            }
+            if (!hasGhostData) {
+                gainFactor[ch] = 0.0f; // Exhausted -> Silence
+                if (ch == 0) currentGhostTargetUI.store(0.0f);
+                continue; 
+            }
         }
 
         if (guideRMS[ch] > currentMacroPeak[ch]) {
@@ -218,9 +237,8 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                 gainFactor[ch] = 0.0f;
             } else {
                 float desiredTargetLevel = guideRMS[ch]; 
-                float liveInputBase = inputRMS[ch]; // Apples to Apples TRUE division
+                float liveInputBase = inputRMS[ch]; 
 
-                // SPACE MODE
                 if (mode == 2) {
                     float thresholdX = currentMacroPeak[ch] * 0.25f;  
                     float thresholdY = currentMacroPeak[ch] * 0.01f;  
@@ -239,14 +257,12 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 
                 float rawTargetGain = desiredTargetLevel / (liveInputBase + 0.00001f);
 
-                // VOX MODE
                 if (mode == 1 && ratio > 1) {
                     float targetGainDb = 20.0f * std::log10(rawTargetGain);
                     targetGainDb *= (float)ratio; 
                     rawTargetGain = std::pow(10.0f, targetGainDb / 20.0f);
                 }
 
-                // PUNCH MODE
                 if (mode == 3) {
                     float dryCrest = guidePeak[ch] / (guideRMS[ch] + 0.00001f);
                     float inputCrest = inputPeak[ch] / (inputRMS[ch] + 0.00001f);
@@ -319,8 +335,8 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         bool isTransient = (mode == 3 && gainFactor[ch] > 1.05f);
         auto* channelData = mainBuffer.getWritePointer(ch);
         
-        // ISSUE 4 FIX: Instantly snap the fader to the correct position if the DAW loops!
-        if (playheadJumped) {
+        // FIX 1 & 3 APPLIED: Instantly snap the fader on Play or Loop backwards!
+        if (forceSnapFader) {
             currentFaderGain[ch] = gainFactor[ch];
         }
 
@@ -387,7 +403,7 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                 }
             }
 
-            // ISSUE 1 FIX: Transparent Hard Clipper for Base & Ghost modes.
+            // Transparent Hard Clipper for Base & Ghost modes
             if (shredOn) {
                 sampleVal = std::clamp(sampleVal, -1.0f, 1.0f);
             } 
