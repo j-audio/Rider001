@@ -92,8 +92,10 @@ public:
     // UI Feedback States
     std::atomic<int> ghostLedState { 0 }; 
     std::atomic<double> lastRecordedPPQ { 0.0 };
-    std::atomic<int> lastRecordedIndex { -1 }; // ADD THIS LINE: Tracks array holes
-
+    std::atomic<int> lastRecordedIndex { -1 };
+    
+    // ADD THIS LINE: Tracks the past volume for True Zero-Order Hold interpolation
+    float previousGhostRMS[2] { 0.0f, 0.0f };
 private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginProcessor)
 };
