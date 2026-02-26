@@ -153,6 +153,8 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         ghostLedState.store(0);
     }
 
+    float sampleRateSafe = (currentSampleRate > 0.0) ? (float)currentSampleRate : 44100.0f;
+
     // Ballistics
     float attackTime = (readMode) ? 0.25f : ((mode == 1) ? 0.015f : ((mode == 2) ? 0.002f : 0.001f));
     float releaseTime = (readMode) ? 0.25f : ((mode == 1) ? 0.030f : ((mode == 2) ? musicalRelease * 8.0f : musicalRelease));
