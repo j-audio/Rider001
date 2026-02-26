@@ -91,7 +91,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     bool forceExt = forceExternalSidechain.load();
     bool hasSidechain = (getBusCount(true) > 1 && getBus(true, 1)->isEnabled());
     
-    // Safely route the guide signal based on UI buttons and actual DAW routing
     for (int ch = 0; ch < numChannels; ++ch) {
         if (forceExt && !hasSidechain) {
             guideRMS[ch] = 0.0f;
@@ -110,7 +109,7 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     }
 
     // ==========================================================
-    // TEMPO & PLAYHEAD ENGINE (WITH SNAP DETECTOR)
+    // TEMPO & PLAYHEAD ENGINE (WITH JUMP DETECTOR)
     // ==========================================================
     double currentBPM = 120.0;
     double currentPPQ = 0.0;
@@ -127,7 +126,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     static double previousPPQ = 0.0;
     static bool wasPlaying = false;
     
-    // FIX 1 & 3: Detect if we just pressed Play, or if the DAW looped backwards
     bool justStartedPlaying = isPlaying && !wasPlaying;
     bool jumpedBackward = currentPPQ < previousPPQ;
     bool forceSnapFader = justStartedPlaying || (isPlaying && jumpedBackward);
@@ -163,6 +161,7 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     {
         if (!isPlaying) {
             ghostLedState.store(3); 
+            lastRecordedIndex.store(-1); // Reset gap tracker when paused
         } 
         else if (currentPPQ <= 0.0) {
             ghostLedState.store(1); 
@@ -173,12 +172,23 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
             if (isAppending) 
             {
                 ghostLedState.store(2); 
+                
+                // Initialize empty space with -1.0f (Empty Marker), not 0.0f (Silence)
                 if (ppqIndex >= ghostMapL.size()) {
-                    ghostMapL.resize((size_t)ppqIndex + 1, 0.0f);
-                    ghostMapR.resize((size_t)ppqIndex + 1, 0.0f);
+                    ghostMapL.resize((size_t)ppqIndex + 1, -1.0f);
+                    ghostMapR.resize((size_t)ppqIndex + 1, -1.0f);
                 }
-                ghostMapL[(size_t)ppqIndex] = guideRMS[0];
-                ghostMapR[(size_t)ppqIndex] = guideRMS[1];
+                
+                // HOLE FILLER: Prevent zeroes caused by DAW buffer sizes skipping index steps
+                int lastIdx = lastRecordedIndex.load();
+                int startIdx = (lastIdx >= 0 && lastIdx < ppqIndex) ? lastIdx + 1 : ppqIndex;
+                
+                for (int i = startIdx; i <= ppqIndex; ++i) {
+                    ghostMapL[(size_t)i] = guideRMS[0];
+                    ghostMapR[(size_t)i] = guideRMS[1];
+                }
+                
+                lastRecordedIndex.store(ppqIndex);
                 lastRecordedPPQ.store(currentPPQ);
             } else {
                 ghostLedState.store(1); 
@@ -187,12 +197,20 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     } 
     else {
         ghostLedState.store(0);
+        lastRecordedIndex.store(-1); // Reset gap tracker when recording disabled
     }
 
     // ==========================================================
     // UNIFIED SOURCE OF TRUTH
     // ==========================================================
-    bool hasGhostData = (readMode && isPlaying && ppqIndex >= 0 && ppqIndex < ghostMapL.size());
+    bool isIndexValid = (readMode && isPlaying && ppqIndex >= 0 && ppqIndex < ghostMapL.size());
+    bool hasGhostData = false;
+    
+    // Evaluate if the Ghost Data is real audio or an unrecorded/exhausted gap
+    if (isIndexValid) {
+        float testVal = ghostMapL[(size_t)ppqIndex];
+        hasGhostData = (testVal >= 0.0f); // -1.0f indicates empty track
+    }
 
     for (int ch = 0; ch < numChannels; ++ch) {
         if (hasGhostData) {
@@ -211,14 +229,13 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     for (int ch = 0; ch < numChannels; ++ch) 
     {
         if (readMode) {
-            // FIX 2: If Paused, needle rests at 0 (Unity). If exhausted, silence.
             if (!isPlaying) {
                 gainFactor[ch] = 1.0f; // Paused -> Unity
                 if (ch == 0) currentGhostTargetUI.store(0.0f);
                 continue;
             }
             if (!hasGhostData) {
-                gainFactor[ch] = 0.0f; // Exhausted -> Silence
+                gainFactor[ch] = 0.0f; // Track exhausted or unrecorded section -> True Silence
                 if (ch == 0) currentGhostTargetUI.store(0.0f);
                 continue; 
             }
@@ -335,7 +352,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         bool isTransient = (mode == 3 && gainFactor[ch] > 1.05f);
         auto* channelData = mainBuffer.getWritePointer(ch);
         
-        // FIX 1 & 3 APPLIED: Instantly snap the fader on Play or Loop backwards!
         if (forceSnapFader) {
             currentFaderGain[ch] = gainFactor[ch];
         }
@@ -403,7 +419,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                 }
             }
 
-            // Transparent Hard Clipper for Base & Ghost modes
             if (shredOn) {
                 sampleVal = std::clamp(sampleVal, -1.0f, 1.0f);
             } 

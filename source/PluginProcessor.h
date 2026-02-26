@@ -92,6 +92,7 @@ public:
     // UI Feedback States
     std::atomic<int> ghostLedState { 0 }; 
     std::atomic<double> lastRecordedPPQ { 0.0 };
+    std::atomic<int> lastRecordedIndex { -1 }; // ADD THIS LINE: Tracks array holes
 
 private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginProcessor)
