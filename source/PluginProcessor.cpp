@@ -46,12 +46,10 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     
     lastWrittenIdx[0] = -1; lastWrittenIdx[1] = -1;
 
-    // Buffer-Agnostic Envelope Windows
     envCoeff = static_cast<float>(std::exp(-1.0 / (0.010 * sampleRate)));
     peakReleaseCoeff = static_cast<float>(std::exp(-1.0 / (0.050 * sampleRate)));
 
-    // AUDIT PASS 1 FIX: Pre-allocate 5 million indices to guarantee ZERO audio dropouts.
-    // 5M indices @ 500 PPQ = ~1 hour 20 minutes of recording time at 120BPM. (20MB RAM cost).
+    // Pre-allocate 5 million indices (1h20m at 120BPM) to prevent audio thread crashes
     ghostMapL.assign(5000000, -1.0f);
     ghostMapR.assign(5000000, -1.0f);
 }
@@ -119,13 +117,39 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     
     previousPPQ = currentPPQ;
     wasPlaying = isPlaying;
-    
-    if (forceSnapFader) {
-        lastWrittenIdx[0] = -1; 
-        lastWrittenIdx[1] = -1;
-    }
 
     float sampleRateSafe = (currentSampleRate > 0.0) ? (float)currentSampleRate : 44100.0f;
+    
+    // ENVELOPE PRE-WARMING: Resolves initial 1st-sample onset spikes
+    if (forceSnapFader && numSamples > 0) {
+        int warmUpSamples = std::min(32, numSamples);
+        float sumLive[2] = {0.0f, 0.0f};
+        float sumGuide[2] = {0.0f, 0.0f};
+
+        for (int i = 0; i < warmUpSamples; ++i) {
+            for (int ch = 0; ch < numChannels; ++ch) {
+                float l = mainBuffer.getSample(ch, i);
+                float g = l; 
+                if (forceExt && hasSidechain) g = scBuffer.getSample((ch < scChannels) ? ch : 0, i);
+                else if (forceExt && !hasSidechain) g = 0.0f;
+                
+                sumLive[ch] += l * l;
+                sumGuide[ch] += g * g;
+            }
+        }
+        for (int ch = 0; ch < numChannels; ++ch) {
+            float startLive = std::sqrt(sumLive[ch] / (float)warmUpSamples);
+            float startGuide = std::sqrt(sumGuide[ch] / (float)warmUpSamples);
+            
+            envStateLive[ch] = startLive * startLive;
+            envStateGuide[ch] = startGuide * startGuide;
+            
+            peakStateLive[ch] = startLive; 
+            peakStateGuide[ch] = startGuide;
+            lastWrittenIdx[ch] = -1; 
+        }
+    }
+
     float secondsPerQuarter = 60.0f / (float)currentBPM;
     float secondsPer128th = secondsPerQuarter / 32.0f;
     float musicalRelease = std::clamp(secondsPer128th * (2.0f / 3.0f), 0.002f, 0.040f);
@@ -156,8 +180,8 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         lastWrittenIdx[1] = -1;
     }
 
-    float attackTime = (readMode) ? 0.25f : ((mode == 1) ? 0.015f : ((mode == 2) ? 0.002f : 0.001f));
-    float releaseTime = (readMode) ? 0.25f : ((mode == 1) ? 0.030f : ((mode == 2) ? musicalRelease * 8.0f : musicalRelease));
+    float attackTime = (mode == 1) ? 0.015f : ((mode == 2) ? 0.002f : 0.001f);
+    float releaseTime = (mode == 1) ? 0.030f : ((mode == 2) ? musicalRelease * 8.0f : musicalRelease);
     float attackCoeff = 1.0f - std::exp(-1.0f / (attackTime * sampleRateSafe));
     float releaseCoeff = 1.0f - std::exp(-1.0f / (releaseTime * sampleRateSafe));
 
@@ -187,15 +211,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                 guideSample = 0.0f; 
             }
 
-            // AUDIT PASS 3 FIX: Pre-warm continuous envelopes on start/loop.
-            // Eliminates "Cold-Start" math spikes causing the inconsistent output peaks.
-            if (forceSnapFader && i == 0) {
-                envStateLive[ch] = liveSample * liveSample;
-                envStateGuide[ch] = guideSample * guideSample;
-                peakStateLive[ch] = std::abs(liveSample);
-                peakStateGuide[ch] = std::abs(guideSample);
-            }
-
             envStateLive[ch] = envCoeff * envStateLive[ch] + (1.0f - envCoeff) * (liveSample * liveSample);
             float currentLiveRMS = std::sqrt(envStateLive[ch]);
             
@@ -206,8 +221,17 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
             peakStateGuide[ch] = std::max(std::abs(guideSample), peakStateGuide[ch] * peakReleaseCoeff);
 
             // Phase-Locked Capture: Writes only ONCE perfectly on the index boundary.
-            if (writeMode && isPlaying && arrayIdx < ghostMapL.size()) {
+            if (writeMode && isPlaying && arrayIdx >= 0 && arrayIdx < (int)ghostMapL.size()) {
                 if (arrayIdx != lastWrittenIdx[ch]) {
+                    if (lastWrittenIdx[ch] >= 0 && arrayIdx > lastWrittenIdx[ch] + 1) {
+                        int gap = arrayIdx - lastWrittenIdx[ch];
+                        if (gap < 50) { 
+                            for (int fill = lastWrittenIdx[ch] + 1; fill < arrayIdx; ++fill) {
+                                if (ch == 0) ghostMapL[fill] = currentGuideRMS;
+                                if (ch == 1) ghostMapR[fill] = currentGuideRMS;
+                            }
+                        }
+                    }
                     if (ch == 0) ghostMapL[arrayIdx] = currentGuideRMS;
                     if (ch == 1) ghostMapR[arrayIdx] = currentGuideRMS;
                     lastWrittenIdx[ch] = arrayIdx;
@@ -219,7 +243,7 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
             float targetGain = 1.0f;
 
             bool hasGhostData = false;
-            if (readMode && isPlaying && arrayIdx + 1 < ghostMapL.size()) {
+            if (readMode && isPlaying && arrayIdx >= 0 && arrayIdx + 1 < (int)ghostMapL.size()) {
                 float val1 = (ch == 0) ? ghostMapL[arrayIdx] : ghostMapR[arrayIdx];
                 float val2 = (ch == 0) ? ghostMapL[arrayIdx + 1] : ghostMapR[arrayIdx + 1];
                 
@@ -227,13 +251,11 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                     hasGhostData = true;
                     float fraction = (float)(exactIndex - (double)arrayIdx);
                     
-                    // AUDIT PASS 2 FIX: Exponential Interpolation.
-                    // Audio decays exponentially. Linear lines over-estimate the curve, causing the +1.5dB boost.
-                    // This mathematically mimics the true physical slope of the audio waveform.
-                    if (val1 > val2 && val2 > 0.00001f) {
-                        targetRMS = val1 * std::pow(val2 / val1, fraction); // Exponential decay curve
+                    // Exponential Interpolator with Epsilon guards
+                    if (val1 > val2 && val2 > 0.00001f && val1 > 0.00001f) {
+                        targetRMS = val1 * std::pow(val2 / val1, fraction); 
                     } else {
-                        targetRMS = val1 + fraction * (val2 - val1); // Linear attack curve
+                        targetRMS = val1 + fraction * (val2 - val1); 
                     }
                     
                     if (ch == 0) displayGhostTarget = targetRMS;
@@ -263,7 +285,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                         }
                     }
 
-                    // Strict 1:1 math division.
                     targetGain = desiredLevel / currentLiveRMS; 
 
                     if (mode == 1 && ratio > 1) {
@@ -287,7 +308,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                     }
 
                     targetGain = std::clamp(targetGain, 0.0f, 32.0f);
-                    if (hasGhostData) targetGain = std::clamp(targetGain, 0.25f, 4.0f);
                     if (mode == 2 && currentLiveRMS >= 0.25f) targetGain = 1.0f;
                 }
             }
@@ -296,8 +316,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                 currentFaderGain[ch] = targetGain; 
             } else {
                 bool useFast = (mode == 3) ? (targetGain > currentFaderGain[ch]) : (targetGain < currentFaderGain[ch]);
-                if (readMode) useFast = false;
-                
                 currentFaderGain[ch] += (useFast ? attackCoeff : releaseCoeff) * (targetGain - currentFaderGain[ch]);
             }
 
@@ -325,7 +343,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                 holdCounter[ch] = 0;
             }
 
-            // CHOP mode corrected to use the continuous guide peak, preventing dropouts
             if (chopOn && targetRMS < (peakStateGuide[ch] * chopThresh)) outSample = 0.0f;
 
             if (shredOn || mode != 3) {
