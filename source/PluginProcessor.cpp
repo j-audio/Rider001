@@ -180,8 +180,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                     ghostMapR.resize((size_t)ppqIndex + 1, -1.0f);
                 }
                 
-                // ISSUE 2 FIX: True Zero-Order Hold. 
-                // We fill the DAW skips with the PREVIOUS valid volume, preventing the "+1dB Look-Ahead offset"
                 int lastIdx = lastRecordedIndex.load();
                 int startIdx = (lastIdx >= 0 && lastIdx < ppqIndex) ? lastIdx + 1 : ppqIndex;
                 
@@ -190,11 +188,9 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                     ghostMapR[(size_t)i] = previousGhostRMS[1];
                 }
                 
-                // Write the current live volume only into the current instant
                 ghostMapL[(size_t)ppqIndex] = guideRMS[0];
                 ghostMapR[(size_t)ppqIndex] = guideRMS[1];
                 
-                // Update tracker memory
                 previousGhostRMS[0] = guideRMS[0];
                 previousGhostRMS[1] = guideRMS[1];
                 lastRecordedIndex.store(ppqIndex);
@@ -284,7 +280,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 
                 float rawTargetGain = desiredTargetLevel / (liveInputBase + 0.00001f);
                 
-                // ISSUE 1 FIX: Prevent the unstable +6dB math division spike caused by DAW buffer fade-ins on block 1
                 if (hasGhostData && forceSnapFader) {
                     rawTargetGain = 1.0f; 
                 }
@@ -434,10 +429,11 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                 }
             }
 
+            // FIX: Isolate the soft clipper to PUNCH mode to ensure 1:1 mathematical transparency
             if (shredOn) {
                 sampleVal = std::clamp(sampleVal, -1.0f, 1.0f);
             } 
-            else if (isTransient) {
+            else if (mode == 3 && isTransient) {
                 sampleVal = std::tanh(sampleVal * 1.05f); 
             } 
             else {
