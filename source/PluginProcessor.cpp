@@ -33,17 +33,20 @@ void PluginProcessor::changeProgramName (int index, const juce::String& newName)
 //==============================================================================
 void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
+    juce::ignoreUnused (samplesPerBlock); // We no longer rely on block sizes!
     currentSampleRate = sampleRate;
     
     currentFaderGain[0] = 1.0f;
     currentFaderGain[1] = 1.0f;
-    currentMacroPeak[0] = 0.0001f;
-    currentMacroPeak[1] = 0.0001f;
-    liveMacroPeak[0]    = 0.0001f;
-    liveMacroPeak[1]    = 0.0001f;
+    
+    envStateLive[0] = 0.0f; envStateLive[1] = 0.0f;
+    envStateGuide[0] = 0.0f; envStateGuide[1] = 0.0f;
+    peakStateLive[0] = 0.0f; peakStateLive[1] = 0.0f;
+    peakStateGuide[0] = 0.0f; peakStateGuide[1] = 0.0f;
 
-    double blocksPerSecond = sampleRate / static_cast<double>(samplesPerBlock);
-    macroPeakRelease = static_cast<float>(std::exp(-1.0 / (2.0 * blocksPerSecond)));
+    // Buffer-Agnostic 10ms RMS Envelope window
+    envCoeff = static_cast<float>(std::exp(-1.0 / (0.010 * sampleRate)));
+    peakReleaseCoeff = static_cast<float>(std::exp(-1.0 / (0.050 * sampleRate)));
 }
 
 void PluginProcessor::releaseResources() {}
@@ -73,43 +76,20 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 
     auto mainBuffer = getBusBuffer(buffer, true, 0); 
     int numChannels = std::min(mainBuffer.getNumChannels(), 2); 
-
-    // ==========================================================
-    // INITIAL MEASUREMENT ARRAYS
-    // ==========================================================
-    float inputRMS[2] = {0.0f, 0.0f};
-    float inputPeak[2] = {0.0f, 0.0f};
-    float guideRMS[2] = {0.0f, 0.0f};
-    float guidePeak[2] = {0.0f, 0.0f};
-    float gainFactor[2] = {1.0f, 1.0f};
-
-    for (int ch = 0; ch < numChannels; ++ch) {
-        inputRMS[ch] = mainBuffer.getRMSLevel(ch, 0, mainBuffer.getNumSamples());
-        inputPeak[ch] = mainBuffer.getMagnitude(ch, 0, mainBuffer.getNumSamples());
-    }
+    int numSamples = mainBuffer.getNumSamples();
 
     bool forceExt = forceExternalSidechain.load();
     bool hasSidechain = (getBusCount(true) > 1 && getBus(true, 1)->isEnabled());
     
-    for (int ch = 0; ch < numChannels; ++ch) {
-        if (forceExt && !hasSidechain) {
-            guideRMS[ch] = 0.0f;
-            guidePeak[ch] = 0.0f;
-        } 
-        else if (forceExt && hasSidechain) {
-            auto scBuffer = getBusBuffer(buffer, true, 1);
-            int scCh = (ch < scBuffer.getNumChannels()) ? ch : 0; 
-            guideRMS[ch] = scBuffer.getRMSLevel(scCh, 0, scBuffer.getNumSamples());
-            guidePeak[ch] = scBuffer.getMagnitude(scCh, 0, scBuffer.getNumSamples());
-        } 
-        else {
-            guideRMS[ch] = inputRMS[ch];
-            guidePeak[ch] = inputPeak[ch];
-        }
+    juce::AudioBuffer<float> scBuffer;
+    int scChannels = 0;
+    if (hasSidechain) {
+        scBuffer = getBusBuffer(buffer, true, 1);
+        scChannels = scBuffer.getNumChannels();
     }
 
     // ==========================================================
-    // TEMPO & PLAYHEAD ENGINE (WITH JUMP DETECTOR)
+    // TEMPO & PLAYHEAD ENGINE
     // ==========================================================
     double currentBPM = 120.0;
     double currentPPQ = 0.0;
@@ -133,9 +113,10 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     previousPPQ = currentPPQ;
     wasPlaying = isPlaying;
     
+    // Clear continuous states on loop/play to prevent mathematical bleed-over
     if (forceSnapFader) {
-        currentMacroPeak[0] = 0.0001f;
-        currentMacroPeak[1] = 0.0001f;
+        envStateLive[0] = 0.0f; envStateLive[1] = 0.0f;
+        envStateGuide[0] = 0.0f; envStateGuide[1] = 0.0f;
     }
 
     float secondsPerQuarter = 60.0f / (float)currentBPM;
@@ -150,307 +131,200 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     int ratio = currentRatio.load(); 
     int shredMode = currentShredMode.load();
 
-    // ==========================================================
-    // THE GHOST ENGINE: TRUE ZERO-ORDER HOLD RECORDING
-    // ==========================================================
     bool writeMode = isGhostRecording.load();
     bool readMode = isGhostReading.load();
-    int ppqIndex = (int)(currentPPQ * 50.0); 
     
-    if (writeMode) 
-    {
-        if (!isPlaying) {
-            ghostLedState.store(3); 
-            lastRecordedIndex.store(-1);
-            previousGhostRMS[0] = 0.0f;
-            previousGhostRMS[1] = 0.0f;
-        } 
-        else if (currentPPQ <= 0.0) {
-            ghostLedState.store(1); 
-        }
-        else 
-        {
-            bool isAppending = (ghostMapL.size() == 0 || ppqIndex <= ghostMapL.size() + 2);
-            if (isAppending) 
-            {
-                ghostLedState.store(2); 
-                
-                if (ppqIndex >= ghostMapL.size()) {
-                    ghostMapL.resize((size_t)ppqIndex + 1, -1.0f);
-                    ghostMapR.resize((size_t)ppqIndex + 1, -1.0f);
-                }
-                
-                int lastIdx = lastRecordedIndex.load();
-                int startIdx = (lastIdx >= 0 && lastIdx < ppqIndex) ? lastIdx + 1 : ppqIndex;
-                
-                for (int i = startIdx; i < ppqIndex; ++i) {
-                    ghostMapL[(size_t)i] = previousGhostRMS[0];
-                    ghostMapR[(size_t)i] = previousGhostRMS[1];
-                }
-                
-                ghostMapL[(size_t)ppqIndex] = guideRMS[0];
-                ghostMapR[(size_t)ppqIndex] = guideRMS[1];
-                
-                previousGhostRMS[0] = guideRMS[0];
-                previousGhostRMS[1] = guideRMS[1];
-                lastRecordedIndex.store(ppqIndex);
-                lastRecordedPPQ.store(currentPPQ);
-            } else {
-                ghostLedState.store(1); 
-            }
-        }
-    } 
-    else {
-        ghostLedState.store(0);
-        lastRecordedIndex.store(-1);
-        previousGhostRMS[0] = 0.0f;
-        previousGhostRMS[1] = 0.0f;
-    }
-
-    // ==========================================================
-    // UNIFIED SOURCE OF TRUTH
-    // ==========================================================
-    bool isIndexValid = (readMode && isPlaying && ppqIndex >= 0 && ppqIndex < ghostMapL.size());
-    bool hasGhostData = false;
+    // We establish a high-resolution grid (100 scans per beat)
+    double ppqResolution = 100.0; 
     
-    if (isIndexValid) {
-        float testVal = ghostMapL[(size_t)ppqIndex];
-        hasGhostData = (testVal >= 0.0f); 
-    }
-
-    for (int ch = 0; ch < numChannels; ++ch) {
-        if (hasGhostData) {
-            float ghostVal = (ch == 0) ? ghostMapL[(size_t)ppqIndex] : ghostMapR[(size_t)ppqIndex];
-            guideRMS[ch] = ghostVal;
-            guidePeak[ch] = ghostVal; 
-            if (ch == 0) currentGhostTargetUI.store(ghostVal);
-        }
-    }
-
-    sidechainBusLevel.store(std::max(guideRMS[0], guideRMS[1]));
-
-    // ==========================================================
-    // DUAL MONO TARGET CALCULATION
-    // ==========================================================
-    for (int ch = 0; ch < numChannels; ++ch) 
-    {
-        if (readMode) {
-            if (!isPlaying) {
-                gainFactor[ch] = 1.0f; 
-                if (ch == 0) currentGhostTargetUI.store(0.0f);
-                continue;
-            }
-            if (!hasGhostData) {
-                gainFactor[ch] = 0.0f; 
-                if (ch == 0) currentGhostTargetUI.store(0.0f);
-                continue; 
-            }
-        }
-
-        if (guideRMS[ch] > currentMacroPeak[ch]) {
-            currentMacroPeak[ch] = guideRMS[ch]; 
-        } else {
-            currentMacroPeak[ch] *= macroPeakRelease; 
-        }
-        if (currentMacroPeak[ch] < 0.0001f) currentMacroPeak[ch] = 0.0001f;
-
-        if (inputRMS[ch] >= 0.00001f)
-        {
-            if (guideRMS[ch] < 0.00001f) {
-                gainFactor[ch] = 0.0f;
-            } else {
-                float desiredTargetLevel = guideRMS[ch]; 
-                float liveInputBase = inputRMS[ch]; 
-
-                if (mode == 2) {
-                    float thresholdX = currentMacroPeak[ch] * 0.25f;  
-                    float thresholdY = currentMacroPeak[ch] * 0.01f;  
-                    float spaceExponent = (ratio == 1) ? 0.5f : (1.0f / (float)ratio);
-
-                    if (desiredTargetLevel < thresholdX && desiredTargetLevel > thresholdY) {
-                        desiredTargetLevel = thresholdX * std::pow(desiredTargetLevel / thresholdX, spaceExponent);
-                    } 
-                    else if (desiredTargetLevel <= thresholdY && thresholdY > 0.00001f) {
-                        float maxMultiplier = std::pow(thresholdX / thresholdY, spaceExponent); 
-                        float fadeRatio = desiredTargetLevel / thresholdY; 
-                        float evaporatingMultiplier = 1.0f + ((maxMultiplier - 1.0f) * fadeRatio);
-                        desiredTargetLevel = desiredTargetLevel * evaporatingMultiplier;
-                    }
-                }
-
-                float rawTargetGain = desiredTargetLevel / (liveInputBase + 0.00001f);
-                
-                if (hasGhostData && forceSnapFader) {
-                    rawTargetGain = 1.0f; 
-                }
-
-                if (mode == 1 && ratio > 1) {
-                    float targetGainDb = 20.0f * std::log10(rawTargetGain);
-                    targetGainDb *= (float)ratio; 
-                    rawTargetGain = std::pow(10.0f, targetGainDb / 20.0f);
-                }
-
-                if (mode == 3) {
-                    float dryCrest = guidePeak[ch] / (guideRMS[ch] + 0.00001f);
-                    float inputCrest = inputPeak[ch] / (inputRMS[ch] + 0.00001f);
-                    float loudnessComp = 1.0f + (1.0f - juce::jmin(1.0f, guidePeak[ch]));
-                    float punchMultiplier = 0.09f * (float)ratio;
-
-                    if (dryCrest > inputCrest + 0.05f) {
-                        float restorationAmount = dryCrest / inputCrest;
-                        rawTargetGain *= (restorationAmount * loudnessComp * 0.8f); 
-                    }
-                    else if (std::abs(dryCrest - inputCrest) <= 0.05f && dryCrest > 2.0f) {
-                        float smartBoost = 1.0f + (punchMultiplier * dryCrest * loudnessComp);
-                        if (smartBoost > 3.0f) smartBoost = 3.0f; 
-                        rawTargetGain *= smartBoost;
-                    }
-                }
-
-                gainFactor[ch] = std::clamp(rawTargetGain, 0.0f, 32.0f);
-                
-                if (hasGhostData) {
-                    gainFactor[ch] = std::clamp(gainFactor[ch], 0.25f, 4.0f); 
-                }
-                
-                if (mode == 2) {
-                    float thresholdX = currentMacroPeak[ch] * 0.25f;
-                    if (inputRMS[ch] >= thresholdX) {
-                        gainFactor[ch] = 1.0f; 
-                    } else {
-                        gainFactor[ch] = std::min(gainFactor[ch], 8.0f); 
-                    }
-                }
-            }
-        } else {
-            gainFactor[ch] = 1.0f; 
-        }
-    }
-
-    // ==========================================================
-    // BALLISTICS SETTINGS
-    // ==========================================================
-    float attackTime = 0.05f; 
-    float releaseTime = 0.10f; 
-    
-    if (readMode) {
-        attackTime = 0.25f;  
-        releaseTime = 0.25f; 
-    }
-    else if (mode == 1) { 
-        attackTime = 0.015f; 
-        releaseTime = 0.030f; 
-    }
-    else if (mode == 2) { 
-        attackTime = 0.002f; 
-        releaseTime = musicalRelease * 8.0f; 
-    }
-    else if (mode == 3) { 
-        attackTime = 0.001f; 
-        releaseTime = musicalRelease; 
-    }
-
-    float sampleRateSafe = (currentSampleRate > 0.0) ? (float)currentSampleRate : 44100.0f;
-    float attackCoeff = 1.0f - std::exp(-1.0f / (attackTime * sampleRateSafe));
-    float releaseCoeff = 1.0f - std::exp(-1.0f / (releaseTime * sampleRateSafe));
-
-    // ==========================================================
-    // PER-CHANNEL SAMPLE PROCESSING
-    // ==========================================================
-    for (int ch = 0; ch < numChannels; ++ch)
-    {
-        bool isTransient = (mode == 3 && gainFactor[ch] > 1.05f);
-        auto* channelData = mainBuffer.getWritePointer(ch);
+    // Safe memory expansion at the start of the block to prevent mid-loop audio dropouts
+    if (writeMode && isPlaying) {
+        ghostLedState.store(2);
+        double endPPQ = currentPPQ + (numSamples * ((currentBPM / 60.0) / currentSampleRate));
+        int maxNeededIndex = (int)(endPPQ * ppqResolution) + 10;
         
-        if (forceSnapFader) {
-            currentFaderGain[ch] = gainFactor[ch];
+        if (maxNeededIndex >= ghostMapL.size()) {
+            ghostMapL.resize(maxNeededIndex + 2000, -1.0f); // Pre-allocate chunks to save CPU
+            ghostMapR.resize(maxNeededIndex + 2000, -1.0f);
         }
+    } else if (writeMode && !isPlaying) {
+        ghostLedState.store(3);
+    } else {
+        ghostLedState.store(0);
+    }
 
-       for (int sampleIndex = 0; sampleIndex < mainBuffer.getNumSamples(); ++sampleIndex)
+    // Ballistics
+    float attackTime = (readMode) ? 0.25f : ((mode == 1) ? 0.015f : ((mode == 2) ? 0.002f : 0.001f));
+    float releaseTime = (readMode) ? 0.25f : ((mode == 1) ? 0.030f : ((mode == 2) ? musicalRelease * 8.0f : musicalRelease));
+    float attackCoeff = 1.0f - std::exp(-1.0f / (attackTime * currentSampleRate));
+    float releaseCoeff = 1.0f - std::exp(-1.0f / (releaseTime * currentSampleRate));
+
+    // UI Meter Trackers
+    float maxLiveRMS = 0.0f;
+    float maxGuideRMS = 0.0f;
+    float maxFaderVal = 0.0f;
+    float displayGhostTarget = 0.0f;
+
+    // Calculate exactly how much musical time passes during 1 single audio sample
+    double ppqPerSample = (currentBPM / 60.0) / currentSampleRate;
+
+    // ==========================================================
+    // THE SAMPLE-ACCURATE ENGINE (100% Buffer Independent)
+    // ==========================================================
+    for (int i = 0; i < numSamples; ++i) 
+    {
+        // 1. Calculate Exact Micro-Position
+        double exactSamplePPQ = currentPPQ + (i * ppqPerSample);
+        double exactIndex = exactSamplePPQ * ppqResolution;
+        int arrayIdx = (int)exactIndex;
+
+        for (int ch = 0; ch < numChannels; ++ch) 
         {
-            bool useFastTime = false;
+            // 2. Fetch Raw Audio Samples
+            float liveSample = mainBuffer.getSample(ch, i);
+            float guideSample = liveSample; 
             
-            if (readMode) {
-                useFastTime = false; 
+            if (forceExt && hasSidechain) {
+                int scCh = (ch < scChannels) ? ch : 0;
+                guideSample = scBuffer.getSample(scCh, i);
+            } else if (forceExt && !hasSidechain) {
+                guideSample = 0.0f; // Enforce silence if nothing is plugged in
             }
-            else if (mode == 3) {
-                useFastTime = (gainFactor[ch] > currentFaderGain[ch]);
-            } else {
-                useFastTime = (gainFactor[ch] < currentFaderGain[ch]);
+
+            // 3. Continuous Envelope Followers (Replaces block-based RMS)
+            envStateLive[ch] = envCoeff * envStateLive[ch] + (1.0f - envCoeff) * (liveSample * liveSample);
+            float currentLiveRMS = std::sqrt(envStateLive[ch]);
+            
+            envStateGuide[ch] = envCoeff * envStateGuide[ch] + (1.0f - envCoeff) * (guideSample * guideSample);
+            float currentGuideRMS = std::sqrt(envStateGuide[ch]);
+            
+            peakStateLive[ch] = std::max(std::abs(liveSample), peakStateLive[ch] * peakReleaseCoeff);
+            peakStateGuide[ch] = std::max(std::abs(guideSample), peakStateGuide[ch] * peakReleaseCoeff);
+
+            // Record to Ghost Timeline Sample-by-Sample
+            if (writeMode && isPlaying && arrayIdx < ghostMapL.size()) {
+                if (ch == 0) ghostMapL[arrayIdx] = currentGuideRMS;
+                if (ch == 1) ghostMapR[arrayIdx] = currentGuideRMS;
+                lastRecordedPPQ.store(exactSamplePPQ);
             }
-            
-            if (useFastTime) {
-                currentFaderGain[ch] += attackCoeff * (gainFactor[ch] - currentFaderGain[ch]); 
-            } else {
-                currentFaderGain[ch] += releaseCoeff * (gainFactor[ch] - currentFaderGain[ch]); 
+
+            // 4. Determine The Source of Truth
+            float targetRMS = currentGuideRMS; 
+            float targetGain = 1.0f;
+
+            bool hasGhostData = false;
+            if (readMode && isPlaying && arrayIdx + 1 < ghostMapL.size()) {
+                float val1 = (ch == 0) ? ghostMapL[arrayIdx] : ghostMapR[arrayIdx];
+                float val2 = (ch == 0) ? ghostMapL[arrayIdx + 1] : ghostMapR[arrayIdx + 1];
+                
+                if (val1 >= 0.0f && val2 >= 0.0f) {
+                    hasGhostData = true;
+                    // Perfect Sample-Accurate Linear Interpolation between grid points
+                    float fraction = (float)(exactIndex - (double)arrayIdx);
+                    targetRMS = val1 + fraction * (val2 - val1);
+                    if (ch == 0) displayGhostTarget = targetRMS;
+                }
             }
-            
-            float sampleVal = channelData[sampleIndex];
-            float appliedGain = currentFaderGain[ch];
 
-            if (flipOn) { 
-                appliedGain = 1.0f / std::max(currentFaderGain[ch], 0.1f); 
-            } 
-            
-            sampleVal *= appliedGain;
+            // 5. The Math Core
+            if (readMode && (!isPlaying || !hasGhostData)) {
+                targetGain = (!isPlaying) ? 1.0f : 0.0f; // Pause = Unity, Exhausted = Silence
+            }
+            else if (currentLiveRMS >= 0.00001f) {
+                if (targetRMS < 0.00001f) {
+                    targetGain = 0.0f;
+                } else {
+                    float desiredLevel = targetRMS;
 
-            if (shredOn) {
-                float rawSample = sampleVal; 
+                    if (mode == 2) {
+                        float threshX = 0.25f;  
+                        float threshY = 0.01f;  
+                        float exp = (ratio == 1) ? 0.5f : (1.0f / (float)ratio);
 
-                if (shredMode == 1) { 
-                    float drive = 5.0f + (currentMacroPeak[ch] * 25.0f); 
-                    float folded = std::sin(sampleVal * drive);
-                    sampleVal = (rawSample * 0.5f) + (folded * 0.25f);
-                } 
-                else if (shredMode == 2) { 
-                    int holdTarget = juce::jmax(1, (int)(musicalRelease * sampleRateSafe * 0.45f));
-                    if (holdCounter[ch] >= holdTarget) {
-                        heldSample[ch] = sampleVal;
-                        holdCounter[ch] = 0;
-                    } else {
-                        sampleVal = heldSample[ch];
-                        holdCounter[ch]++;
+                        if (desiredLevel < threshX && desiredLevel > threshY) {
+                            desiredLevel = threshX * std::pow(desiredLevel / threshX, exp);
+                        } else if (desiredLevel <= threshY) {
+                            float maxMult = std::pow(threshX / threshY, exp); 
+                            float fade = desiredLevel / threshY; 
+                            desiredLevel = desiredLevel * (1.0f + ((maxMult - 1.0f) * fade));
+                        }
                     }
-                    float fatDry = std::tanh(rawSample * 2.0f) * 0.5f;
-                    sampleVal = fatDry + (sampleVal * 0.8f); 
-                } 
-                else if (shredMode == 3) { 
-                    float fuzz = std::tanh(sampleVal * 50.0f);
-                    sampleVal = fuzz * 0.3f; 
+
+                    targetGain = desiredLevel / currentLiveRMS; // PERFECT 1:1 DIVISION
+
+                    if (mode == 1 && ratio > 1) {
+                        float db = 20.0f * std::log10(targetGain);
+                        targetGain = std::pow(10.0f, (db * (float)ratio) / 20.0f);
+                    }
+
+                    bool isTransient = false;
+                    if (mode == 3) {
+                        float dryCrest = peakStateGuide[ch] / (targetRMS + 0.00001f);
+                        float inCrest = peakStateLive[ch] / (currentLiveRMS + 0.00001f);
+                        float loudComp = 1.0f + (1.0f - juce::jmin(1.0f, peakStateGuide[ch]));
+                        
+                        if (dryCrest > inCrest + 0.05f) {
+                            targetGain *= ((dryCrest / inCrest) * loudComp * 0.8f);
+                            isTransient = true;
+                        } else if (std::abs(dryCrest - inCrest) <= 0.05f && dryCrest > 2.0f) {
+                            targetGain *= std::min(1.0f + (0.09f * ratio * dryCrest * loudComp), 3.0f);
+                            isTransient = true;
+                        }
+                    }
+
+                    targetGain = std::clamp(targetGain, 0.0f, 32.0f);
+                    if (hasGhostData) targetGain = std::clamp(targetGain, 0.25f, 4.0f);
+                    if (mode == 2 && currentLiveRMS >= 0.25f) targetGain = 1.0f;
                 }
+            }
+
+            // 6. Smooth the Fader & Apply
+            if (forceSnapFader && i == 0) {
+                currentFaderGain[ch] = targetGain; // Prevents the start lag
             } else {
-                heldSample[ch] = sampleVal;
-                holdCounter[ch] = 0;
+                bool useFast = (mode == 3) ? (targetGain > currentFaderGain[ch]) : (targetGain < currentFaderGain[ch]);
+                if (readMode) useFast = false;
+                
+                currentFaderGain[ch] += (useFast ? attackCoeff : releaseCoeff) * (targetGain - currentFaderGain[ch]);
             }
 
-            if (chopOn) { 
-                if (guideRMS[ch] < (currentMacroPeak[ch] * chopThresh)) {
-                    sampleVal = 0.0f;
+            float outSample = liveSample * (flipOn ? (1.0f / std::max(currentFaderGain[ch], 0.1f)) : currentFaderGain[ch]);
+
+            // 7. Modifiers & Clippers
+            if (shredOn) {
+                if (shredMode == 1) {
+                    outSample = (outSample * 0.5f) + (std::sin(outSample * 25.0f) * 0.25f);
+                } else if (shredMode == 3) {
+                    outSample = std::tanh(outSample * 50.0f) * 0.3f;
                 }
             }
+            if (chopOn && targetRMS < 0.05f) outSample = 0.0f;
 
-            // FIX: Isolate the soft clipper to PUNCH mode to ensure 1:1 mathematical transparency
-            if (shredOn) {
-                sampleVal = std::clamp(sampleVal, -1.0f, 1.0f);
-            } 
-            else if (mode == 3 && isTransient) {
-                sampleVal = std::tanh(sampleVal * 1.05f); 
-            } 
-            else {
-                sampleVal = std::clamp(sampleVal, -1.0f, 1.0f);
+            // Transparent Clipping (Protects 1:1 math)
+            if (shredOn || mode != 3) {
+                outSample = std::clamp(outSample, -1.0f, 1.0f);
+            } else {
+                outSample = std::tanh(outSample * 1.05f); 
             }
 
-            channelData[sampleIndex] = sampleVal;
+            mainBuffer.setSample(ch, i, outSample);
+
+            // Track peaks for UI
+            maxLiveRMS = std::max(maxLiveRMS, currentLiveRMS);
+            maxGuideRMS = std::max(maxGuideRMS, targetRMS);
+            maxFaderVal = std::max(maxFaderVal, currentFaderGain[ch]);
         }
     }
 
-    float maxFaderGain = std::max(currentFaderGain[0], currentFaderGain[1]);
-    if (maxFaderGain <= 0.00001f) currentGainDb.store(-100.0f);
-    else                          currentGainDb.store(20.0f * std::log10(maxFaderGain));
-
-    float outRmsL = mainBuffer.getRMSLevel(0, 0, mainBuffer.getNumSamples());
-    float outRmsR = (numChannels > 1) ? mainBuffer.getRMSLevel(1, 0, mainBuffer.getNumSamples()) : outRmsL;
-    mainBusLevel.store(std::max(outRmsL, outRmsR));
+    // ==========================================================
+    // UI UPDATES
+    // ==========================================================
+    mainBusLevel.store(maxLiveRMS);
+    sidechainBusLevel.store(maxGuideRMS);
+    currentGhostTargetUI.store(displayGhostTarget);
+    
+    if (maxFaderVal <= 0.00001f) currentGainDb.store(-100.0f);
+    else                         currentGainDb.store(20.0f * std::log10(maxFaderVal));
 }
 
 //==============================================================================

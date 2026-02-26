@@ -44,13 +44,17 @@ private:
     double currentSampleRate { 44100.0 }; 
     
     // ==========================================================
-    // TRUE DUAL MONO MEMORY ARRAYS (0 = Left, 1 = Right)
+    // SAMPLE-ACCURATE ENVELOPE FOLLOWERS (Buffer Agnostic)
     // ==========================================================
-    float currentFaderGain[2] { 1.0f, 1.0f }; 
-    float currentMacroPeak[2] { 0.0001f, 0.0001f }; // Used for the guide/target
-    float liveMacroPeak[2]    { 0.0001f, 0.0001f }; // Dedicated tracker for the live input
+    float envStateLive[2]  { 0.0f, 0.0f }; // Continuous RMS state for the input
+    float envStateGuide[2] { 0.0f, 0.0f }; // Continuous RMS state for the target
+    float peakStateLive[2] { 0.0f, 0.0f }; // Continuous Peak for PUNCH mode
+    float peakStateGuide[2]{ 0.0f, 0.0f }; 
 
-    float macroPeakRelease { 0.99f }; 
+    float envCoeff { 0.0f }; 
+    float peakReleaseCoeff { 0.0f };
+
+    float currentFaderGain[2] { 1.0f, 1.0f }; 
 
     // Audio level tracking for UI
     std::atomic<float> mainBusLevel { 0.0f };
@@ -66,15 +70,13 @@ public:
     // ==========================================================
     // MODE & MODIFIER ENGINES
     // ==========================================================
-    std::atomic<int> currentMode { 0 };     // 0=Base, 1=VOX, 2=SPACE, 3=PUNCH
-    // The Purple Modifiers (Now independent for chaining!)
+    std::atomic<int> currentMode { 0 };     
     std::atomic<bool> isFlipActive { false };
     std::atomic<bool> isShredActive { false };
     std::atomic<bool> isChopActive { false };
     std::atomic<float> chopThreshold { 0.10f }; 
     std::atomic<int> currentRatio { 1 };
     
-    // The SHRED Trilogy
     std::atomic<int> currentShredMode { 1 }; 
     float heldSample[8] { 0.0f };  
     int holdCounter[8] { 0 };   
@@ -87,15 +89,12 @@ public:
 
     std::vector<float> ghostMapL; 
     std::vector<float> ghostMapR;
-    std::atomic<bool> forceExternalSidechain { false }; // False = IN, True = EXT
+    std::atomic<bool> forceExternalSidechain { false }; 
     
     // UI Feedback States
     std::atomic<int> ghostLedState { 0 }; 
     std::atomic<double> lastRecordedPPQ { 0.0 };
-    std::atomic<int> lastRecordedIndex { -1 };
-    
-    // ADD THIS LINE: Tracks the past volume for True Zero-Order Hold interpolation
-    float previousGhostRMS[2] { 0.0f, 0.0f };
+
 private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginProcessor)
 };
