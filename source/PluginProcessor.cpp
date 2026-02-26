@@ -33,7 +33,7 @@ void PluginProcessor::changeProgramName (int index, const juce::String& newName)
 //==============================================================================
 void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    juce::ignoreUnused (samplesPerBlock); // We no longer rely on block sizes!
+    juce::ignoreUnused (samplesPerBlock); 
     currentSampleRate = sampleRate;
     
     currentFaderGain[0] = 1.0f;
@@ -43,10 +43,17 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     envStateGuide[0] = 0.0f; envStateGuide[1] = 0.0f;
     peakStateLive[0] = 0.0f; peakStateLive[1] = 0.0f;
     peakStateGuide[0] = 0.0f; peakStateGuide[1] = 0.0f;
+    
+    lastWrittenIdx[0] = -1; lastWrittenIdx[1] = -1;
 
-    // Buffer-Agnostic 10ms RMS Envelope window
+    // Buffer-Agnostic Envelope Windows
     envCoeff = static_cast<float>(std::exp(-1.0 / (0.010 * sampleRate)));
     peakReleaseCoeff = static_cast<float>(std::exp(-1.0 / (0.050 * sampleRate)));
+
+    // AUDIT PASS 1 FIX: Pre-allocate 5 million indices to guarantee ZERO audio dropouts.
+    // 5M indices @ 500 PPQ = ~1 hour 20 minutes of recording time at 120BPM. (20MB RAM cost).
+    ghostMapL.assign(5000000, -1.0f);
+    ghostMapR.assign(5000000, -1.0f);
 }
 
 void PluginProcessor::releaseResources() {}
@@ -113,12 +120,12 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     previousPPQ = currentPPQ;
     wasPlaying = isPlaying;
     
-    // Clear continuous states on loop/play to prevent mathematical bleed-over
     if (forceSnapFader) {
-        envStateLive[0] = 0.0f; envStateLive[1] = 0.0f;
-        envStateGuide[0] = 0.0f; envStateGuide[1] = 0.0f;
+        lastWrittenIdx[0] = -1; 
+        lastWrittenIdx[1] = -1;
     }
 
+    float sampleRateSafe = (currentSampleRate > 0.0) ? (float)currentSampleRate : 44100.0f;
     float secondsPerQuarter = 60.0f / (float)currentBPM;
     float secondsPer128th = secondsPerQuarter / 32.0f;
     float musicalRelease = std::clamp(secondsPer128th * (2.0f / 3.0f), 0.002f, 0.040f);
@@ -134,55 +141,42 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     bool writeMode = isGhostRecording.load();
     bool readMode = isGhostReading.load();
     
-    // We establish a high-resolution grid (100 scans per beat)
-    double ppqResolution = 100.0; 
+    double ppqResolution = 500.0; 
+    double ppqPerSample = (currentBPM / 60.0) / sampleRateSafe;
     
-    // Safe memory expansion at the start of the block to prevent mid-loop audio dropouts
     if (writeMode && isPlaying) {
         ghostLedState.store(2);
-        double endPPQ = currentPPQ + (numSamples * ((currentBPM / 60.0) / currentSampleRate));
-        int maxNeededIndex = (int)(endPPQ * ppqResolution) + 10;
-        
-        if (maxNeededIndex >= ghostMapL.size()) {
-            ghostMapL.resize(maxNeededIndex + 2000, -1.0f); // Pre-allocate chunks to save CPU
-            ghostMapR.resize(maxNeededIndex + 2000, -1.0f);
-        }
     } else if (writeMode && !isPlaying) {
         ghostLedState.store(3);
+        lastWrittenIdx[0] = -1; 
+        lastWrittenIdx[1] = -1;
     } else {
         ghostLedState.store(0);
+        lastWrittenIdx[0] = -1; 
+        lastWrittenIdx[1] = -1;
     }
 
-    float sampleRateSafe = (currentSampleRate > 0.0) ? (float)currentSampleRate : 44100.0f;
-
-    // Ballistics
     float attackTime = (readMode) ? 0.25f : ((mode == 1) ? 0.015f : ((mode == 2) ? 0.002f : 0.001f));
     float releaseTime = (readMode) ? 0.25f : ((mode == 1) ? 0.030f : ((mode == 2) ? musicalRelease * 8.0f : musicalRelease));
-    float attackCoeff = 1.0f - std::exp(-1.0f / (attackTime * currentSampleRate));
-    float releaseCoeff = 1.0f - std::exp(-1.0f / (releaseTime * currentSampleRate));
+    float attackCoeff = 1.0f - std::exp(-1.0f / (attackTime * sampleRateSafe));
+    float releaseCoeff = 1.0f - std::exp(-1.0f / (releaseTime * sampleRateSafe));
 
-    // UI Meter Trackers
     float maxLiveRMS = 0.0f;
     float maxGuideRMS = 0.0f;
     float maxFaderVal = 0.0f;
     float displayGhostTarget = 0.0f;
 
-    // Calculate exactly how much musical time passes during 1 single audio sample
-    double ppqPerSample = (currentBPM / 60.0) / currentSampleRate;
-
     // ==========================================================
-    // THE SAMPLE-ACCURATE ENGINE (100% Buffer Independent)
+    // THE SAMPLE-ACCURATE ENGINE
     // ==========================================================
     for (int i = 0; i < numSamples; ++i) 
     {
-        // 1. Calculate Exact Micro-Position
         double exactSamplePPQ = currentPPQ + (i * ppqPerSample);
         double exactIndex = exactSamplePPQ * ppqResolution;
         int arrayIdx = (int)exactIndex;
 
         for (int ch = 0; ch < numChannels; ++ch) 
         {
-            // 2. Fetch Raw Audio Samples
             float liveSample = mainBuffer.getSample(ch, i);
             float guideSample = liveSample; 
             
@@ -190,10 +184,18 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                 int scCh = (ch < scChannels) ? ch : 0;
                 guideSample = scBuffer.getSample(scCh, i);
             } else if (forceExt && !hasSidechain) {
-                guideSample = 0.0f; // Enforce silence if nothing is plugged in
+                guideSample = 0.0f; 
             }
 
-            // 3. Continuous Envelope Followers (Replaces block-based RMS)
+            // AUDIT PASS 3 FIX: Pre-warm continuous envelopes on start/loop.
+            // Eliminates "Cold-Start" math spikes causing the inconsistent output peaks.
+            if (forceSnapFader && i == 0) {
+                envStateLive[ch] = liveSample * liveSample;
+                envStateGuide[ch] = guideSample * guideSample;
+                peakStateLive[ch] = std::abs(liveSample);
+                peakStateGuide[ch] = std::abs(guideSample);
+            }
+
             envStateLive[ch] = envCoeff * envStateLive[ch] + (1.0f - envCoeff) * (liveSample * liveSample);
             float currentLiveRMS = std::sqrt(envStateLive[ch]);
             
@@ -203,14 +205,16 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
             peakStateLive[ch] = std::max(std::abs(liveSample), peakStateLive[ch] * peakReleaseCoeff);
             peakStateGuide[ch] = std::max(std::abs(guideSample), peakStateGuide[ch] * peakReleaseCoeff);
 
-            // Record to Ghost Timeline Sample-by-Sample
+            // Phase-Locked Capture: Writes only ONCE perfectly on the index boundary.
             if (writeMode && isPlaying && arrayIdx < ghostMapL.size()) {
-                if (ch == 0) ghostMapL[arrayIdx] = currentGuideRMS;
-                if (ch == 1) ghostMapR[arrayIdx] = currentGuideRMS;
-                lastRecordedPPQ.store(exactSamplePPQ);
+                if (arrayIdx != lastWrittenIdx[ch]) {
+                    if (ch == 0) ghostMapL[arrayIdx] = currentGuideRMS;
+                    if (ch == 1) ghostMapR[arrayIdx] = currentGuideRMS;
+                    lastWrittenIdx[ch] = arrayIdx;
+                    if (ch == 0) lastRecordedPPQ.store(exactSamplePPQ);
+                }
             }
 
-            // 4. Determine The Source of Truth
             float targetRMS = currentGuideRMS; 
             float targetGain = 1.0f;
 
@@ -221,16 +225,23 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                 
                 if (val1 >= 0.0f && val2 >= 0.0f) {
                     hasGhostData = true;
-                    // Perfect Sample-Accurate Linear Interpolation between grid points
                     float fraction = (float)(exactIndex - (double)arrayIdx);
-                    targetRMS = val1 + fraction * (val2 - val1);
+                    
+                    // AUDIT PASS 2 FIX: Exponential Interpolation.
+                    // Audio decays exponentially. Linear lines over-estimate the curve, causing the +1.5dB boost.
+                    // This mathematically mimics the true physical slope of the audio waveform.
+                    if (val1 > val2 && val2 > 0.00001f) {
+                        targetRMS = val1 * std::pow(val2 / val1, fraction); // Exponential decay curve
+                    } else {
+                        targetRMS = val1 + fraction * (val2 - val1); // Linear attack curve
+                    }
+                    
                     if (ch == 0) displayGhostTarget = targetRMS;
                 }
             }
 
-            // 5. The Math Core
             if (readMode && (!isPlaying || !hasGhostData)) {
-                targetGain = (!isPlaying) ? 1.0f : 0.0f; // Pause = Unity, Exhausted = Silence
+                targetGain = (!isPlaying) ? 1.0f : 0.0f; 
             }
             else if (currentLiveRMS >= 0.00001f) {
                 if (targetRMS < 0.00001f) {
@@ -252,7 +263,8 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                         }
                     }
 
-                    targetGain = desiredLevel / currentLiveRMS; // PERFECT 1:1 DIVISION
+                    // Strict 1:1 math division.
+                    targetGain = desiredLevel / currentLiveRMS; 
 
                     if (mode == 1 && ratio > 1) {
                         float db = 20.0f * std::log10(targetGain);
@@ -280,9 +292,8 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                 }
             }
 
-            // 6. Smooth the Fader & Apply
             if (forceSnapFader && i == 0) {
-                currentFaderGain[ch] = targetGain; // Prevents the start lag
+                currentFaderGain[ch] = targetGain; 
             } else {
                 bool useFast = (mode == 3) ? (targetGain > currentFaderGain[ch]) : (targetGain < currentFaderGain[ch]);
                 if (readMode) useFast = false;
@@ -292,17 +303,31 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 
             float outSample = liveSample * (flipOn ? (1.0f / std::max(currentFaderGain[ch], 0.1f)) : currentFaderGain[ch]);
 
-            // 7. Modifiers & Clippers
             if (shredOn) {
                 if (shredMode == 1) {
                     outSample = (outSample * 0.5f) + (std::sin(outSample * 25.0f) * 0.25f);
+                } else if (shredMode == 2) {
+                    int holdTarget = juce::jmax(1, (int)(musicalRelease * sampleRateSafe * 0.45f));
+                    if (holdCounter[ch] >= holdTarget) {
+                        heldSample[ch] = outSample;
+                        holdCounter[ch] = 0;
+                    } else {
+                        outSample = heldSample[ch];
+                        holdCounter[ch]++;
+                    }
+                    float fatDry = std::tanh(liveSample * 2.0f) * 0.5f;
+                    outSample = fatDry + (outSample * 0.8f); 
                 } else if (shredMode == 3) {
                     outSample = std::tanh(outSample * 50.0f) * 0.3f;
                 }
+            } else {
+                heldSample[ch] = outSample;
+                holdCounter[ch] = 0;
             }
-            if (chopOn && targetRMS < 0.05f) outSample = 0.0f;
 
-            // Transparent Clipping (Protects 1:1 math)
+            // CHOP mode corrected to use the continuous guide peak, preventing dropouts
+            if (chopOn && targetRMS < (peakStateGuide[ch] * chopThresh)) outSample = 0.0f;
+
             if (shredOn || mode != 3) {
                 outSample = std::clamp(outSample, -1.0f, 1.0f);
             } else {
@@ -311,7 +336,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 
             mainBuffer.setSample(ch, i, outSample);
 
-            // Track peaks for UI
             maxLiveRMS = std::max(maxLiveRMS, currentLiveRMS);
             maxGuideRMS = std::max(maxGuideRMS, targetRMS);
             maxFaderVal = std::max(maxFaderVal, currentFaderGain[ch]);

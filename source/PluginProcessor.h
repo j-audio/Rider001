@@ -44,11 +44,11 @@ private:
     double currentSampleRate { 44100.0 }; 
     
     // ==========================================================
-    // SAMPLE-ACCURATE ENVELOPE FOLLOWERS (Buffer Agnostic)
+    // SAMPLE-ACCURATE ENVELOPE FOLLOWERS
     // ==========================================================
-    float envStateLive[2]  { 0.0f, 0.0f }; // Continuous RMS state for the input
-    float envStateGuide[2] { 0.0f, 0.0f }; // Continuous RMS state for the target
-    float peakStateLive[2] { 0.0f, 0.0f }; // Continuous Peak for PUNCH mode
+    float envStateLive[2]  { 0.0f, 0.0f }; 
+    float envStateGuide[2] { 0.0f, 0.0f }; 
+    float peakStateLive[2] { 0.0f, 0.0f }; 
     float peakStateGuide[2]{ 0.0f, 0.0f }; 
 
     float envCoeff { 0.0f }; 
@@ -94,6 +94,9 @@ public:
     // UI Feedback States
     std::atomic<int> ghostLedState { 0 }; 
     std::atomic<double> lastRecordedPPQ { 0.0 };
+    
+    // Phase-Locked Capture Tracker
+    int lastWrittenIdx[2] { -1, -1 };
 
 private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginProcessor)
